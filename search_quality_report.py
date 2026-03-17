@@ -1,4 +1,6 @@
 import io
+import json
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
@@ -9,11 +11,10 @@ from matplotlib import pyplot as plt
 from matplotlib.backends.backend_pdf import PdfPages
 from plotly.subplots import make_subplots
 
+# 固定数据源：优先使用真实数据目录「zara周报数据源」，无则回退到「演示」
 DEFAULT_BASE_DIR_CANDIDATES = [
-    Path(__file__).parent / "zara周报数据源",  # 相对路径（Streamlit Cloud）
-    Path("/Users/otis/Downloads/GIT/zara周报自动化/zara周报数据源"),
-    Path("/Users/otis/Downloads/zara周报数据源"),
-    Path("/Users/otis/Downloads"),
+    Path(__file__).parent / "zara周报数据源",
+    Path(__file__).parent / "演示",
 ]
 
 
@@ -70,8 +71,13 @@ def build_default_paths() -> dict:
     hot_latest, hot_prev = find_hotword_periods(base_dir)
     nat_latest, nat_prev = find_natural_word_periods(base_dir)
     
+    # 小程序大盘：自动从文件夹中选取最新的 Excel 文件
+    mini_dir = base_dir / "小程序大盘部分"
+    mini_files = sorted(mini_dir.glob("*.xlsx")) if mini_dir.exists() else []
+    mini_path = str(mini_files[-1]) if mini_files else ""
+
     paths = {
-        "mini": str(base_dir / "小程序大盘部分" / "小程序大盘数据-近30天.xlsx"),
+        "mini": mini_path,
         # 当前周和上周数据分别来自不同文件
         "zara_daily_cur": str(base_dir / "日度数据整体" / f"{latest_period}_zara日度数据.xlsx") if latest_period else "",
         "zara_daily_pre": str(base_dir / "日度数据整体" / f"{prev_period}_zara日度数据.xlsx") if prev_period else "",
@@ -601,19 +607,80 @@ def category_scatter(df: pd.DataFrame, cate: str, title: str):
     sub["标签"] = sub["关键词"]
     
     fig = go.Figure()
-    fig.add_trace(
-        go.Scatter(
-            x=sub[ctr_col],
-            y=sub[cvr_col],
-            mode="markers+text",
-            text=sub["标签"],
-            textposition="top center",
-            textfont=dict(size=8),
-            marker=dict(size=sub["bubble_size"], sizemode="diameter", opacity=0.65),
-            customdata=np.stack([sub["关键词"], sub[pv_col], sub[uv_col]], axis=1),
-            hovertemplate="关键词: %{customdata[0]}<br>搜索PV: %{customdata[1]:,.0f}<br>搜索UV: %{customdata[2]:,.0f}<br>CTR: %{x:.2%}<br>CVR: %{y:.2%}<extra></extra>",
+
+    # 根据 CTR 环比区分表现好/差的词，使用不同颜色
+    has_ctr_change = "CTR_change" in sub.columns
+    if has_ctr_change:
+        good_mask = sub["CTR_change"] >= 0
+        bad_mask = sub["CTR_change"] < 0
+
+        good_sub = sub[good_mask]
+        bad_sub = sub[bad_mask]
+
+        if not good_sub.empty:
+            fig.add_trace(
+                go.Scatter(
+                    x=good_sub[ctr_col],
+                    y=good_sub[cvr_col],
+                    mode="markers+text",
+                    name="表现较好（CTR 环比 ≥ 0）",
+                    text=good_sub["标签"],
+                    textposition="top center",
+                    textfont=dict(size=8),
+                    marker=dict(
+                        size=good_sub["bubble_size"],
+                        sizemode="diameter",
+                        opacity=0.7,
+                        color="#1f77b4",  # 蓝色：好
+                    ),
+                    customdata=np.stack(
+                        [good_sub["关键词"], good_sub[pv_col], good_sub[uv_col]], axis=1
+                    ),
+                    hovertemplate="关键词: %{customdata[0]}<br>搜索PV: %{customdata[1]:,.0f}<br>搜索UV: %{customdata[2]:,.0f}<br>CTR: %{x:.2%}<br>CVR: %{y:.2%}<extra></extra>",
+                )
+            )
+
+        if not bad_sub.empty:
+            fig.add_trace(
+                go.Scatter(
+                    x=bad_sub[ctr_col],
+                    y=bad_sub[cvr_col],
+                    mode="markers+text",
+                    name="表现较弱（CTR 环比 < 0）",
+                    text=bad_sub["标签"],
+                    textposition="top center",
+                    textfont=dict(size=8),
+                    marker=dict(
+                        size=bad_sub["bubble_size"],
+                        sizemode="diameter",
+                        opacity=0.7,
+                        color="#d62728",  # 红色：差
+                    ),
+                    customdata=np.stack(
+                        [bad_sub["关键词"], bad_sub[pv_col], bad_sub[uv_col]], axis=1
+                    ),
+                    hovertemplate="关键词: %{customdata[0]}<br>搜索PV: %{customdata[1]:,.0f}<br>搜索UV: %{customdata[2]:,.0f}<br>CTR: %{x:.2%}<br>CVR: %{y:.2%}<extra></extra>",
+                )
+            )
+
+        # 如果某一类为空（全部好或全部差），避免图例缺失时看不懂颜色含义
+        if good_sub.empty or bad_sub.empty:
+            fig.update_layout(showlegend=True)
+    else:
+        # 无环比数据时，保持统一颜色
+        fig.add_trace(
+            go.Scatter(
+                x=sub[ctr_col],
+                y=sub[cvr_col],
+                mode="markers+text",
+                text=sub["标签"],
+                textposition="top center",
+                textfont=dict(size=8),
+                marker=dict(size=sub["bubble_size"], sizemode="diameter", opacity=0.65),
+                customdata=np.stack([sub["关键词"], sub[pv_col], sub[uv_col]], axis=1),
+                hovertemplate="关键词: %{customdata[0]}<br>搜索PV: %{customdata[1]:,.0f}<br>搜索UV: %{customdata[2]:,.0f}<br>CTR: %{x:.2%}<br>CVR: %{y:.2%}<extra></extra>",
+            )
         )
-    )
     
     # 添加平均值虚线和注释
     if not np.isnan(avg_ctr):
@@ -674,6 +741,316 @@ def category_scatter(df: pd.DataFrame, cate: str, title: str):
     table_data = table_data.sort_values("搜索PV", ascending=False).reset_index(drop=True)
     
     return fig, table_data
+
+
+# ---------- 数据校验 ----------
+REL_TOL = 1e-5
+ABS_TOL = 1e-8
+BASELINE_REL_TOL = 0.001
+BASELINE_PATH = Path(__file__).parent / "演示" / "search_quality_baseline.json"
+
+
+def _num_close(a, b, rel_tol=REL_TOL, abs_tol=ABS_TOL):
+    """数值近似相等（支持 NaN）。"""
+    if pd.isna(a) and pd.isna(b):
+        return True
+    if pd.isna(a) or pd.isna(b):
+        return False
+    if a == 0 and b == 0:
+        return True
+    return np.isclose(float(a), float(b), rtol=rel_tol, atol=abs_tol)
+
+
+def run_display_consistency_checks(wk, contrib, by_type, zara_daily_cur, zara_daily_pre, mini, zara_by_type_cur, zara_by_type_pre):
+    """校验页面展示的数值与从源数据重新计算的结果一致。返回 [(check_name, passed, detail_str), ...]"""
+    results = []
+    gcols = ["搜索PV", "搜索UV", "点击UV", "加购UV", "购买人数", "购买总金额"]
+
+    # 1) 整体周环比：cur_total / pre_total
+    cur_total_recalc = zara_daily_cur[gcols].sum()
+    for col in gcols:
+        ok = _num_close(wk["cur_total"][col], cur_total_recalc[col])
+        results.append((f"本周合计-{col}", ok, f"展示={wk['cur_total'][col]}, 重算={cur_total_recalc[col]}"))
+
+    if zara_daily_pre is not None and not zara_daily_pre.empty:
+        pre_total_recalc = zara_daily_pre[gcols].sum()
+        for col in gcols:
+            ok = _num_close(wk["pre_total"][col], pre_total_recalc[col])
+            results.append((f"上周合计-{col}", ok, f"展示={wk['pre_total'][col]}, 重算={pre_total_recalc[col]}"))
+    else:
+        results.append(("上周合计", True, "无上周数据，跳过"))
+
+    # 2) 周汇总比率：CTR/ATC/CVR/UV_VALUE
+    def ratio(s, num, den):
+        d = s.get(den, np.nan)
+        if d == 0 or pd.isna(d):
+            return np.nan
+        return s.get(num, np.nan) / d
+    cur_total = wk["cur_total"]
+    pre_total = wk["pre_total"]
+    for name, num, den in [("CTR", "点击UV", "搜索UV"), ("ATC", "加购UV", "搜索UV"), ("CVR", "购买人数", "搜索UV"), ("UV_VALUE", "购买总金额", "搜索UV")]:
+        cur_r = ratio(cur_total, num, den)
+        pre_r = ratio(pre_total, num, den)
+        ok_cur = _num_close(wk["metrics"][name][0], cur_r)
+        ok_pre = _num_close(wk["metrics"][name][1], pre_r)
+        results.append((f"metrics-{name}-本周", ok_cur, f"展示={wk['metrics'][name][0]}, 重算={cur_r}"))
+        results.append((f"metrics-{name}-上周", ok_pre, f"展示={wk['metrics'][name][1]}, 重算={pre_r}"))
+
+    # 3) 贡献占比
+    cur_start = wk["cur"]["date"].min()
+    cur_end = wk["cur"]["date"].max()
+    pre_start = cur_start - pd.Timedelta(days=7)
+    pre_end = cur_start - pd.Timedelta(days=1)
+    mini_cur = mini[(mini["date"] >= cur_start) & (mini["date"] <= cur_end)]
+    mini_pre = mini[(mini["date"] >= pre_start) & (mini["date"] <= pre_end)]
+    cur_amt_sum = mini_cur["成交金额"].sum()
+    pre_amt_sum = mini_pre["成交金额"].sum()
+    cur_buyer_sum = mini_cur["成交人数"].sum()
+    pre_buyer_sum = mini_pre["成交人数"].sum()
+    cur_amt_share_recalc = (wk["cur_total"]["购买总金额"] / cur_amt_sum) if cur_amt_sum else np.nan
+    pre_amt_share_recalc = (wk["pre_total"]["购买总金额"] / pre_amt_sum) if pre_amt_sum else np.nan
+    cur_buyer_share_recalc = (wk["cur_total"]["购买人数"] / cur_buyer_sum) if cur_buyer_sum else np.nan
+    pre_buyer_share_recalc = (wk["pre_total"]["购买人数"] / pre_buyer_sum) if pre_buyer_sum else np.nan
+    results.append(("贡献-金额占比-本周", _num_close(contrib["shares"]["金额占比"][0], cur_amt_share_recalc), ""))
+    results.append(("贡献-金额占比-上周", _num_close(contrib["shares"]["金额占比"][1], pre_amt_share_recalc), ""))
+    results.append(("贡献-人数占比-本周", _num_close(contrib["shares"]["人数占比"][0], cur_buyer_share_recalc), ""))
+    results.append(("贡献-人数占比-上周", _num_close(contrib["shares"]["人数占比"][1], pre_buyer_share_recalc), ""))
+
+    # 4) 按类型：by_type 与 zara_by_type_cur groupby 一致
+    cur_g = zara_by_type_cur.groupby("操作类型", as_index=False)[gcols].sum()
+    total_amt_cur = cur_g["购买总金额"].sum()
+    for _, row in cur_g.iterrows():
+        op = row["操作类型"]
+        bt_row = by_type[by_type["操作类型"] == op]
+        if bt_row.empty:
+            results.append((f"按类型-{op}-存在", False, "当前结果中缺失该操作类型"))
+            continue
+        bt_row = bt_row.iloc[0]
+        for col in gcols:
+            lbl = f"{col}_本周"
+            if lbl in bt_row.index:
+                ok = _num_close(bt_row[lbl], row[col])
+                results.append((f"按类型-{op}-{col}", ok, f"展示={bt_row[lbl]}, 重算={row[col]}"))
+        share_recalc = (row["购买总金额"] / total_amt_cur) if total_amt_cur else np.nan
+        ok_share = _num_close(bt_row.get("金额占比_本周"), share_recalc)
+        results.append((f"按类型-{op}-金额占比", ok_share, ""))
+
+    return results
+
+
+def run_formula_checks(wk, contrib, by_type, zara_daily_cur, zara_by_type_cur):
+    """校验 CTR/ATC/CVR/UV_VALUE 及环比公式。返回 [(check_name, passed, detail_str), ...]"""
+    results = []
+
+    # 日度：每行 CTR = 点击UV/搜索UV 等
+    for rate_name, num_col, den_col in [
+        ("CTR", "点击UV", "搜索UV"),
+        ("ATC", "加购UV", "搜索UV"),
+        ("CVR", "购买人数", "搜索UV"),
+        ("UV_VALUE", "购买总金额", "搜索UV"),
+    ]:
+        if den_col not in zara_daily_cur.columns or num_col not in zara_daily_cur.columns or rate_name not in zara_daily_cur.columns:
+            continue
+        den = zara_daily_cur[den_col]
+        num = zara_daily_cur[num_col]
+        expected = num / den.replace(0, np.nan)
+        actual = zara_daily_cur[rate_name]
+        mask = den.notna() & (den != 0)
+        if mask.any():
+            ok = np.isclose(actual[mask].astype(float), expected[mask].astype(float), rtol=REL_TOL, atol=ABS_TOL, equal_nan=True).all()
+            bad_idx = np.where(~np.isclose(actual[mask].astype(float), expected[mask].astype(float), rtol=REL_TOL, atol=ABS_TOL, equal_nan=True))[0]
+            detail = f"首行不匹配: idx={bad_idx[0]}" if not ok and len(bad_idx) else ""
+            results.append((f"日度-{rate_name}", ok, detail))
+
+    # 周汇总 metrics 与 cur_total 重算一致（已在 display 中覆盖，这里只做公式层面）
+    cur_total = wk["cur_total"]
+    def ratio(s, n, d):
+        den = s.get(d, np.nan)
+        if den == 0 or pd.isna(den):
+            return np.nan
+        return s.get(n, np.nan) / den
+    for name, num, den in [("CTR", "点击UV", "搜索UV"), ("ATC", "加购UV", "搜索UV"), ("CVR", "购买人数", "搜索UV"), ("UV_VALUE", "购买总金额", "搜索UV")]:
+        r = ratio(cur_total, num, den)
+        results.append((f"周汇总-{name}", _num_close(wk["metrics"][name][0], r), f"cur_total 重算={r}"))
+
+    # 按类型：CTR_本周 = 点击UV_本周/搜索UV_本周
+    for _, row in by_type.iterrows():
+        op = row["操作类型"]
+        su = row.get("搜索UV_本周", 0) or 0
+        if su == 0:
+            continue
+        ctr_exp = row["点击UV_本周"] / su
+        atc_exp = row["加购UV_本周"] / su
+        cvr_exp = row["购买人数_本周"] / su
+        results.append((f"按类型-{op}-CTR公式", _num_close(row["CTR_本周"], ctr_exp), ""))
+        results.append((f"按类型-{op}-ATC公式", _num_close(row["ATC_本周"], atc_exp), ""))
+        results.append((f"按类型-{op}-CVR公式", _num_close(row["CVR_本周"], cvr_exp), ""))
+
+    return results
+
+
+def run_data_quality_checks(mini, zara_daily_cur, zara_daily_pre, zara_by_type_cur, zara_by_type_pre, hotwords, natural_words):
+    """数据质量：缺失、异常值、日期等。返回 [(check_name, passed, message), ...]"""
+    results = []
+
+    # mini
+    if mini is not None and not mini.empty:
+        has_date = "date" in mini.columns or "日期" in mini.columns
+        results.append(("mini-日期列存在", has_date, "缺少日期列" if not has_date else ""))
+        if "成交金额" in mini.columns:
+            neg = (mini["成交金额"] < 0).any()
+            results.append(("mini-成交金额无负值", not neg, "存在负值" if neg else ""))
+    else:
+        results.append(("mini-有数据", False, "mini 为空"))
+
+    # zara_daily_cur
+    required_daily = ["Date", "搜索PV", "搜索UV", "点击UV", "加购UV", "购买人数", "购买总金额"]
+    for df, label in [(zara_daily_cur, "日度-本周"), (zara_daily_pre, "日度-上周")]:
+        if df is None or df.empty:
+            results.append((f"{label}-有数据", True, "无数据跳过"))
+            continue
+        for c in required_daily:
+            if c == "Date" and "date" in df.columns:
+                c = "date"
+            if c not in df.columns:
+                results.append((f"{label}-列{c}", False, f"缺少列 {c}"))
+        if "date" in df.columns:
+            n_days = df["date"].nunique()
+            results.append((f"{label}-天数", n_days == 7 or label == "日度-上周", f"天数={n_days}"))
+
+    # zara_by_type
+    for df, label in [(zara_by_type_cur, "按类型-本周"), (zara_by_type_pre, "按类型-上周")]:
+        if df is None or df.empty:
+            results.append((f"{label}-有数据", True, "无数据跳过"))
+            continue
+        results.append((f"{label}-操作类型列", "操作类型" in df.columns, ""))
+        results.append((f"{label}-日期列", "date" in df.columns, ""))
+
+    # hotwords
+    if hotwords is not None and not hotwords.empty:
+        has_kw = "关键词" in hotwords.columns
+        results.append(("热词-关键词列", has_kw, ""))
+        if "搜索PV" in hotwords.columns and hotwords["搜索PV"].notna().any():
+            neg_pv = (hotwords["搜索PV"] < 0).any()
+            results.append(("热词-搜索PV无负值", not neg_pv, "存在负值" if neg_pv else ""))
+    else:
+        results.append(("热词-有数据", True, "无热词数据"))
+
+    # natural_words
+    if natural_words is not None and not natural_words.empty:
+        results.append(("自然词-关键词列", "关键词" in natural_words.columns, ""))
+        if "品类" in natural_words.columns:
+            bad_cat = ~natural_words["品类"].isin(CATEGORIES)
+            results.append(("自然词-品类在CATEGORIES内", not bad_cat.any(), f"异常品类: {natural_words.loc[bad_cat, '品类'].unique().tolist()}" if bad_cat.any() else ""))
+    else:
+        results.append(("自然词-有数据", True, "无自然词数据"))
+
+    return results
+
+
+def _json_safe(val):
+    if pd.isna(val) or (isinstance(val, float) and np.isnan(val)):
+        return None
+    if isinstance(val, (np.integer, np.int64)):
+        return int(val)
+    if isinstance(val, (np.floating, np.float64)):
+        return float(val)
+    if isinstance(val, (np.bool_, bool)):
+        return bool(val)
+    return val
+
+
+def build_baseline_from_run(wk, contrib, by_type):
+    """从当前运行结果生成基准 dict，可序列化为 JSON。"""
+    def ser_df(df):
+        if df is None or df.empty:
+            return []
+        cols = [c for c in ["操作类型", "搜索UV_本周", "点击UV_本周", "加购UV_本周", "购买人数_本周", "购买总金额_本周", "CTR_本周", "ATC_本周", "CVR_本周", "金额占比_本周"] if c in df.columns]
+        rows = []
+        for _, r in df[cols].iterrows():
+            rows.append({k: _json_safe(r[k]) for k in cols})
+        return rows
+    return {
+        "generated_at": datetime.now().isoformat(),
+        "period": dict(wk["period"]),
+        "cur_total": {k: (float(v) if pd.notna(v) else None) for k, v in wk["cur_total"].items()},
+        "pre_total": {k: (float(v) if pd.notna(v) else None) for k, v in wk["pre_total"].items()},
+        "metrics": {k: [float(x) if pd.notna(x) else None for x in v] for k, v in wk["metrics"].items()},
+        "shares": {k: [float(x) if pd.notna(x) else None for x in v] for k, v in contrib["shares"].items()},
+        "by_type": ser_df(by_type),
+    }
+
+
+def compare_against_baseline(wk, contrib, by_type, baseline_path):
+    """与基准 JSON 对比。返回 (all_passed, list_of_diffs)。"""
+    if not baseline_path or not Path(baseline_path).exists():
+        return None, []  # 无基准
+    try:
+        with open(baseline_path, "r", encoding="utf-8") as f:
+            base = json.load(f)
+    except Exception as e:
+        return False, [f"读取基准失败: {e}"]
+    diffs = []
+
+    def cmp_val(name, cur, ref, rel_tol=BASELINE_REL_TOL):
+        if ref is None and (cur is None or (isinstance(cur, float) and np.isnan(cur))):
+            return True
+        if ref is None or cur is None:
+            if ref != cur:
+                diffs.append(f"{name}: 基准={ref}, 当前={cur}")
+            return ref == cur
+        try:
+            a, b = float(cur), float(ref)
+            if np.isnan(a) and np.isnan(b):
+                return True
+            if np.isnan(a) or np.isnan(b):
+                diffs.append(f"{name}: 基准={ref}, 当前={cur}")
+                return False
+            den = max(abs(b), 1e-9)
+            if abs(a - b) / den > rel_tol:
+                diffs.append(f"{name}: 基准={b}, 当前={a}, 差异={(a-b)/den:.2%}")
+                return False
+        except (TypeError, ValueError):
+            if cur != ref:
+                diffs.append(f"{name}: 基准={ref}, 当前={cur}")
+            return cur == ref
+        return True
+
+    # cur_total
+    for k, v in base.get("cur_total", {}).items():
+        cur_v = wk["cur_total"].get(k)
+        cmp_val(f"cur_total.{k}", cur_v, v)
+    # pre_total
+    for k, v in base.get("pre_total", {}).items():
+        cur_v = wk["pre_total"].get(k)
+        cmp_val(f"pre_total.{k}", cur_v, v)
+    # metrics
+    for k, pair in base.get("metrics", {}).items():
+        cur_pair = wk["metrics"].get(k, (None, None))
+        cmp_val(f"metrics.{k}[0]", cur_pair[0], pair[0] if pair else None)
+        cmp_val(f"metrics.{k}[1]", cur_pair[1], pair[1] if pair and len(pair) > 1 else None)
+    # shares
+    for k, pair in base.get("shares", {}).items():
+        cur_pair = contrib["shares"].get(k, (None, None))
+        cmp_val(f"shares.{k}[0]", cur_pair[0], pair[0] if pair else None)
+        cmp_val(f"shares.{k}[1]", cur_pair[1], pair[1] if pair and len(pair) > 1 else None)
+    # by_type: 按操作类型对齐比较
+    base_bt = {r["操作类型"]: r for r in base.get("by_type", []) if isinstance(r, dict) and "操作类型" in r}
+    for _, row in by_type.iterrows():
+        op = row["操作类型"]
+        if op not in base_bt:
+            diffs.append(f"by_type.{op}: 当前存在，基准中无")
+            continue
+        ref_row = base_bt[op]
+        for col in ["搜索UV_本周", "购买总金额_本周", "CTR_本周", "CVR_本周", "金额占比_本周"]:
+            if col in row.index and col in ref_row:
+                cmp_val(f"by_type.{op}.{col}", row[col], ref_row.get(col))
+    for op in base_bt:
+        if op not in by_type["操作类型"].values:
+            diffs.append(f"by_type.{op}: 基准中存在，当前无")
+
+    all_passed = len(diffs) == 0
+    return all_passed, diffs
 
 
 def build_pdf_bytes(wk: dict, contrib: dict, by_type: pd.DataFrame):
@@ -780,7 +1157,44 @@ def render():
     st.plotly_chart(fig_uvv, use_container_width=True)
 
     st.subheader("3) 搜索类型周环比（全链路）")
-    # 图3-1: 购买总金额+占比标签
+    # 图3-0: 搜索量占比柱状图（柱高为搜索UV占比）
+    fig_t0 = go.Figure()
+    total_uv_cur = by_type["搜索UV_本周"].sum()
+    total_uv_pre = by_type["搜索UV_上周"].sum()
+    uv_share_cur = by_type["搜索UV_本周"] / total_uv_cur if total_uv_cur else np.nan
+    uv_share_pre = by_type["搜索UV_上周"] / total_uv_pre if total_uv_pre else np.nan
+    text_uv_cur = [f"{v:,.0f}\n({s:.1%})" if not pd.isna(s) else f"{v:,.0f}" for v, s in zip(by_type["搜索UV_本周"], uv_share_cur)]
+    text_uv_pre = [f"{v:,.0f}\n({s:.1%})" if not pd.isna(s) else f"{v:,.0f}" for v, s in zip(by_type["搜索UV_上周"], uv_share_pre)]
+    fig_t0.add_trace(
+        go.Bar(
+            x=by_type["操作类型"],
+            y=uv_share_cur,
+            name="本周",
+            marker_color="#4c78a8",
+            text=text_uv_cur,
+            textposition="outside",
+        )
+    )
+    fig_t0.add_trace(
+        go.Bar(
+            x=by_type["操作类型"],
+            y=uv_share_pre,
+            name="上周",
+            marker_color="#9ecae9",
+            text=text_uv_pre,
+            textposition="outside",
+        )
+    )
+    fig_t0.update_layout(
+        height=360,
+        barmode="group",
+        margin=dict(l=20, r=20, t=20, b=20),
+        yaxis=dict(title="搜索UV占比", tickformat=".0%"),
+        title="按搜索类型的搜索量占比",
+    )
+    st.plotly_chart(fig_t0, use_container_width=True)
+
+    # 图3-1: 金额占比柱状图（柱高为占比，标签显示金额+占比）
     fig_t1 = go.Figure()
     total_amt_pre = by_type["购买总金额_上周"].sum()
     if total_amt_pre and not pd.isna(total_amt_pre) and total_amt_pre != 0:
@@ -789,16 +1203,17 @@ def render():
         pre_share = pd.Series([np.nan] * len(by_type), index=by_type.index)
     text_cur = [f"{v:,.0f}\n({s:.1%})" for v, s in zip(by_type["购买总金额_本周"], by_type["金额占比_本周"])]
     text_pre = [f"{v:,.0f}\n({s:.1%})" if pd.notna(s) else f"{v:,.0f}" for v, s in zip(by_type["购买总金额_上周"], pre_share)]
-    fig_t1.add_trace(go.Bar(x=by_type["操作类型"], y=by_type["购买总金额_本周"], name="本周", marker_color="#4c78a8", text=text_cur, textposition="outside"))
-    fig_t1.add_trace(go.Bar(x=by_type["操作类型"], y=by_type["购买总金额_上周"], name="上周", marker_color="#9ecae9", text=text_pre, textposition="outside"))
-    fig_t1.update_layout(height=380, barmode="group", margin=dict(l=20, r=20, t=20, b=20))
+    # y 轴使用金额占比，而不是金额本身
+    fig_t1.add_trace(go.Bar(x=by_type["操作类型"], y=by_type["金额占比_本周"], name="本周", marker_color="#4c78a8", text=text_cur, textposition="outside"))
+    fig_t1.add_trace(go.Bar(x=by_type["操作类型"], y=pre_share, name="上周", marker_color="#9ecae9", text=text_pre, textposition="outside"))
+    fig_t1.update_layout(height=380, barmode="group", margin=dict(l=20, r=20, t=20, b=20), yaxis=dict(title="金额占比", tickformat=".0%"))
     st.plotly_chart(fig_t1, use_container_width=True)
 
-    # 图3-2: 同指标一起，本周浅色、上周深色
+    # 图3-2: 同指标一起（深色=本周，浅色=上周）
     metrics_cfg = [
-        ("CTR", "#9ecae9", "#1f77b4"),
-        ("ATC", "#a1d99b", "#2ca02c"),
-        ("CVR", "#fdae6b", "#d62728"),
+        ("CTR", "#1f77b4", "#9ecae9"),   # 本周深蓝，上周浅蓝
+        ("ATC", "#2ca02c", "#a1d99b"),   # 本周深绿，上周浅绿
+        ("CVR", "#d62728", "#fdae6b"),   # 本周深橙/红，上周浅橙
     ]
     fig_t2 = make_subplots(rows=1, cols=3, subplot_titles=["CTR", "ATC", "CVR"])
     for idx, (m, c_cur, c_pre) in enumerate(metrics_cfg, start=1):
@@ -829,15 +1244,49 @@ def render():
             st.info("该品类暂无热词数据。")
         else:
             st.plotly_chart(fig_hot, use_container_width=True)
-            # 显示热词数据表格（带环比信息，环比显示在同一单元格内）
-            table_data, styled_cols = display_keyword_table(data_hot)
-            styled_df = table_data.style.applymap(style_change_cell, subset=styled_cols)
-            st.dataframe(
-                styled_df,
-                use_container_width=True,
-                height=400,
-                hide_index=True,
-            )
+            # 显示热词数据表格：按 CTR 环比区分「表现好」和「表现差」
+            if "CTR_change" in data_hot.columns:
+                col_good, col_bad = st.columns(2)
+                good_df = data_hot[data_hot["CTR_change"] >= 0]
+                bad_df = data_hot[data_hot["CTR_change"] < 0]
+
+                with col_good:
+                    st.markdown("表现较好（CTR 环比 ≥ 0）")
+                    if good_df.empty:
+                        st.caption("暂无符合条件的词。")
+                    else:
+                        table_data_g, styled_cols_g = display_keyword_table(good_df)
+                        styled_df_g = table_data_g.style.applymap(style_change_cell, subset=styled_cols_g)
+                        st.dataframe(
+                            styled_df_g,
+                            use_container_width=True,
+                            height=380,
+                            hide_index=True,
+                        )
+
+                with col_bad:
+                    st.markdown("表现较弱（CTR 环比 < 0）")
+                    if bad_df.empty:
+                        st.caption("暂无符合条件的词。")
+                    else:
+                        table_data_b, styled_cols_b = display_keyword_table(bad_df)
+                        styled_df_b = table_data_b.style.applymap(style_change_cell, subset=styled_cols_b)
+                        st.dataframe(
+                            styled_df_b,
+                            use_container_width=True,
+                            height=380,
+                            hide_index=True,
+                        )
+            else:
+                # 无环比数据时，保持原有单表展示
+                table_data, styled_cols = display_keyword_table(data_hot)
+                styled_df = table_data.style.applymap(style_change_cell, subset=styled_cols)
+                st.dataframe(
+                    styled_df,
+                    use_container_width=True,
+                    height=400,
+                    hide_index=True,
+                )
 
         st.markdown(f"**{cate} - 自然词分析**")
         fig_nat, data_nat = category_scatter(natural_words, cate, f"{cate} 自然词：CTR vs CVR（气泡=搜索PV）")
@@ -845,17 +1294,125 @@ def render():
             st.info("该品类暂无自然词数据（按末尾品类提取后为空）。")
         else:
             st.plotly_chart(fig_nat, use_container_width=True)
-            # 显示自然词数据表格（带环比信息，环比显示在同一单元格内）
-            table_data_nat, styled_cols_nat = display_keyword_table(data_nat)
-            styled_df_nat = table_data_nat.style.applymap(style_change_cell, subset=styled_cols_nat)
-            st.dataframe(
-                styled_df_nat,
-                use_container_width=True,
-                height=400,
-                hide_index=True,
-            )
+            # 显示自然词数据表格：按 CTR 环比区分「表现好」和「表现差」
+            if "CTR_change" in data_nat.columns:
+                col_good_n, col_bad_n = st.columns(2)
+                good_nat = data_nat[data_nat["CTR_change"] >= 0]
+                bad_nat = data_nat[data_nat["CTR_change"] < 0]
 
-    st.subheader("5) 导出 PDF")
+                with col_good_n:
+                    st.markdown("表现较好（CTR 环比 ≥ 0）")
+                    if good_nat.empty:
+                        st.caption("暂无符合条件的词。")
+                    else:
+                        table_data_gn, styled_cols_gn = display_keyword_table(good_nat)
+                        styled_df_gn = table_data_gn.style.applymap(style_change_cell, subset=styled_cols_gn)
+                        st.dataframe(
+                            styled_df_gn,
+                            use_container_width=True,
+                            height=380,
+                            hide_index=True,
+                        )
+
+                with col_bad_n:
+                    st.markdown("表现较弱（CTR 环比 < 0）")
+                    if bad_nat.empty:
+                        st.caption("暂无符合条件的词。")
+                    else:
+                        table_data_bn, styled_cols_bn = display_keyword_table(bad_nat)
+                        styled_df_bn = table_data_bn.style.applymap(style_change_cell, subset=styled_cols_bn)
+                        st.dataframe(
+                            styled_df_bn,
+                            use_container_width=True,
+                            height=380,
+                            hide_index=True,
+                        )
+            else:
+                # 无环比数据时，保持原有单表展示
+                table_data_nat, styled_cols_nat = display_keyword_table(data_nat)
+                styled_df_nat = table_data_nat.style.applymap(style_change_cell, subset=styled_cols_nat)
+                st.dataframe(
+                    styled_df_nat,
+                    use_container_width=True,
+                    height=400,
+                    hide_index=True,
+                )
+
+    st.subheader("5) 数据校验")
+    disp_checks = run_display_consistency_checks(wk, contrib, by_type, zara_daily_cur, zara_daily_pre, mini, zara_by_type_cur, zara_by_type_pre)
+    formula_checks = run_formula_checks(wk, contrib, by_type, zara_daily_cur, zara_by_type_cur)
+    quality_checks = run_data_quality_checks(mini, zara_daily_cur, zara_daily_pre, zara_by_type_cur, zara_by_type_pre, hotwords, natural_words)
+    baseline_passed, baseline_diffs = compare_against_baseline(wk, contrib, by_type, str(BASELINE_PATH))
+
+    def render_check_list(items, title):
+        passed = sum(1 for _, ok, _ in items if ok)
+        total = len(items)
+        status = "通过" if passed == total else f"{passed}/{total} 通过"
+        with st.expander(f"{title} — {status}", expanded=(passed != total)):
+            for name, ok, detail in items:
+                icon = "✓" if ok else "✗"
+                color = "green" if ok else "red"
+                st.markdown(f"- <span style='color:{color}'>**{icon}**</span> {name}" + (f" — {detail}" if detail else ""), unsafe_allow_html=True)
+
+    render_check_list(disp_checks, "源数据与展示一致")
+    render_check_list(formula_checks, "公式正确性")
+    render_check_list(quality_checks, "数据质量")
+
+    if baseline_passed is None:
+        st.info("未设置基准，可先点击「保存当前结果为基准」再对比。")
+    else:
+        status = "通过" if baseline_passed else "存在差异"
+        with st.expander(f"基准对比 — {status}", expanded=not baseline_passed):
+            if baseline_passed:
+                st.success("当前结果与基准一致。")
+            else:
+                for d in baseline_diffs:
+                    st.markdown(f"- **✗** {d}")
+
+    col_save, col_dl = st.columns(2)
+    with col_save:
+        if st.button("保存当前结果为基准"):
+            bl = build_baseline_from_run(wk, contrib, by_type)
+            try:
+                BASELINE_PATH.parent.mkdir(parents=True, exist_ok=True)
+                with open(BASELINE_PATH, "w", encoding="utf-8") as f:
+                    json.dump(bl, f, ensure_ascii=False, indent=2)
+                st.success(f"已保存至 {BASELINE_PATH}")
+            except Exception as e:
+                st.error(f"保存失败: {e}")
+    with col_dl:
+        report_lines = [
+            "# 数据校验报告",
+            f"生成时间: {datetime.now().isoformat()}",
+            f"周期: {wk['period']['cur']} | {wk['period']['pre']}",
+            "",
+            "## 1. 源数据与展示一致",
+        ]
+        for name, ok, detail in disp_checks:
+            report_lines.append(f"- {'✓' if ok else '✗'} {name}" + (f" — {detail}" if detail else ""))
+        report_lines.extend(["", "## 2. 公式正确性"])
+        for name, ok, detail in formula_checks:
+            report_lines.append(f"- {'✓' if ok else '✗'} {name}" + (f" — {detail}" if detail else ""))
+        report_lines.extend(["", "## 3. 数据质量"])
+        for name, ok, detail in quality_checks:
+            report_lines.append(f"- {'✓' if ok else '✗'} {name}" + (f" — {detail}" if detail else ""))
+        report_lines.extend(["", "## 4. 基准对比"])
+        if baseline_passed is None:
+            report_lines.append("- 未设置基准")
+        elif baseline_passed:
+            report_lines.append("- ✓ 与基准一致")
+        else:
+            for d in baseline_diffs:
+                report_lines.append(f"- ✗ {d}")
+        report_txt = "\n".join(report_lines)
+        st.download_button(
+            label="下载校验报告",
+            data=report_txt,
+            file_name=f"validation_report_{wk['cur']['date'].max().date()}.md",
+            mime="text/markdown",
+        )
+
+    st.subheader("6) 导出 PDF")
     pdf_bytes = build_pdf_bytes(wk, contrib, by_type)
     st.download_button(
         label="生成并下载PDF文件",
