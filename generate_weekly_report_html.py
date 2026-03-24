@@ -1,3 +1,4 @@
+import uuid
 from pathlib import Path
 
 import pandas as pd
@@ -13,6 +14,9 @@ from search_quality_report import (
     contribution_summary,
     type_weekly_summary,
     category_scatter,
+    display_keyword_table,
+    style_change_cell,
+    split_keyword_perf_groups,
     fmt_num,
     fmt_pct,
     safe_pct_change,
@@ -126,11 +130,33 @@ def build_core_figures(wk, contrib, by_type):
         title="UV_VALUE（本周 vs 上周）",
     )
 
-    # 图4：搜索类型周环比（CTR / ATC / CVR）
+    # 图4：搜索量占比（本周/上周）
+    fig_t0 = go.Figure()
+    total_uv_cur = by_type["搜索UV_本周"].sum()
+    total_uv_pre = by_type["搜索UV_上周"].sum()
+    uv_share_cur = by_type["搜索UV_本周"] / total_uv_cur if total_uv_cur else pd.Series([float("nan")] * len(by_type))
+    uv_share_pre = by_type["搜索UV_上周"] / total_uv_pre if total_uv_pre else pd.Series([float("nan")] * len(by_type))
+    text_uv_cur = [f"{v:,.0f}\n({s:.1%})" if pd.notna(s) else f"{v:,.0f}" for v, s in zip(by_type["搜索UV_本周"], uv_share_cur)]
+    text_uv_pre = [f"{v:,.0f}\n({s:.1%})" if pd.notna(s) else f"{v:,.0f}" for v, s in zip(by_type["搜索UV_上周"], uv_share_pre)]
+    fig_t0.add_trace(go.Bar(x=by_type["操作类型"], y=uv_share_cur, name="本周", marker_color="#4c78a8", text=text_uv_cur, textposition="outside"))
+    fig_t0.add_trace(go.Bar(x=by_type["操作类型"], y=uv_share_pre, name="上周", marker_color="#9ecae9", text=text_uv_pre, textposition="outside"))
+    fig_t0.update_layout(height=360, barmode="group", margin=dict(l=20, r=20, t=20, b=20), yaxis=dict(title="搜索UV占比", tickformat=".0%"), title="按搜索类型的搜索量占比")
+
+    # 图5：金额占比（本周/上周）
+    fig_t1 = go.Figure()
+    total_amt_pre = by_type["购买总金额_上周"].sum()
+    pre_share = by_type["购买总金额_上周"] / total_amt_pre if total_amt_pre else pd.Series([float("nan")] * len(by_type))
+    text_cur = [f"{v:,.0f}\n({s:.1%})" for v, s in zip(by_type["购买总金额_本周"], by_type["金额占比_本周"])]
+    text_pre = [f"{v:,.0f}\n({s:.1%})" if pd.notna(s) else f"{v:,.0f}" for v, s in zip(by_type["购买总金额_上周"], pre_share)]
+    fig_t1.add_trace(go.Bar(x=by_type["操作类型"], y=by_type["金额占比_本周"], name="本周", marker_color="#4c78a8", text=text_cur, textposition="outside"))
+    fig_t1.add_trace(go.Bar(x=by_type["操作类型"], y=pre_share, name="上周", marker_color="#9ecae9", text=text_pre, textposition="outside"))
+    fig_t1.update_layout(height=380, barmode="group", margin=dict(l=20, r=20, t=20, b=20), yaxis=dict(title="金额占比", tickformat=".0%"))
+
+    # 图6：搜索类型周环比（CTR / ATC / CVR）
     metrics_cfg = [
-        ("CTR", "#9ecae9", "#1f77b4"),
-        ("ATC", "#a1d99b", "#2ca02c"),
-        ("CVR", "#fdae6b", "#d62728"),
+        ("CTR", "#1f77b4", "#9ecae9"),
+        ("ATC", "#2ca02c", "#a1d99b"),
+        ("CVR", "#d62728", "#fdae6b"),
     ]
     fig_t2 = make_subplots(
         rows=1, cols=3, subplot_titles=["CTR", "ATC", "CVR"]
@@ -176,7 +202,21 @@ def build_core_figures(wk, contrib, by_type):
         title="搜索类型周环比（CTR / ATC / CVR）",
     )
 
-    return fig_rate, fig_share, fig_uvv, fig_t2
+    return fig_rate, fig_share, fig_uvv, fig_t0, fig_t1, fig_t2
+
+
+def table_html(df: pd.DataFrame) -> str:
+    if df is None or df.empty:
+        return "<p class='small'>暂无符合条件的词。</p>"
+    tdf, styled_cols = display_keyword_table(df)
+    uid = uuid.uuid4().hex[:12]
+    styler = tdf.style.set_table_attributes(f'class="kw-table" id="kw_{uid}"')
+    if hasattr(styler, "map"):
+        styler = styler.map(style_change_cell, subset=styled_cols)
+    else:
+        styler = styler.applymap(style_change_cell, subset=styled_cols)
+    inner = styler.to_html(table_uuid=uid, exclude_styles=False)
+    return f'<div class="table-scroll">{inner}</div>'
 
 
 def generate_html(output_path: Path):
@@ -190,21 +230,18 @@ def generate_html(output_path: Path):
     contrib = contribution_summary(wk, mini)
     by_type = type_weekly_summary(zara_by_type_cur, zara_by_type_pre)
 
-    fig_rate, fig_share, fig_uvv, fig_t2 = build_core_figures(wk, contrib, by_type)
+    fig_rate, fig_share, fig_uvv, fig_t0, fig_t1, fig_t2 = build_core_figures(wk, contrib, by_type)
 
-    # 各品类热词 / 自然词散点图（可选）
-    cate_figs = []
+    # 各品类热词 / 自然词散点图 + 分组表格
+    cate_blocks = []
     for cate in CATEGORIES:
-        fig_hot, _ = category_scatter(
+        fig_hot, data_hot = category_scatter(
             hotwords, cate, f"{cate} 热词：CTR vs CVR（气泡=搜索PV）"
         )
-        fig_nat, _ = category_scatter(
+        fig_nat, data_nat = category_scatter(
             natural_words, cate, f"{cate} 自然词：CTR vs CVR（气泡=搜索PV）"
         )
-        if fig_hot is not None:
-            cate_figs.append((f"{cate} 热词分析", fig_hot))
-        if fig_nat is not None:
-            cate_figs.append((f"{cate} 自然词分析", fig_nat))
+        cate_blocks.append((cate, fig_hot, data_hot, fig_nat, data_nat))
 
     # 生成 HTML
     html_parts = []
@@ -230,8 +267,13 @@ def generate_html(output_path: Path):
     .kpi-label {{ font-size: 12px; color: #666; }}
     .kpi-value {{ font-size: 16px; font-weight: 600; }}
     .kpi-delta {{ font-size: 11px; color: #888; }}
+    .kpi-delta.kpi-up {{ color: #09ab3b; font-weight: 600; }}
+    .kpi-delta.kpi-down {{ color: #ff4b4b; font-weight: 600; }}
     .section-desc {{ color: #666; font-size: 13px; margin-bottom: 4px; }}
     .small {{ font-size: 12px; color: #777; }}
+    .table-scroll {{ max-height: 420px; overflow: auto; border: 1px solid #e6eaf0; border-radius: 8px; margin-top: 8px; background: #fff; }}
+    .table-scroll table.dataframe {{ border-collapse: collapse; width: 100%; font-size: 13px; }}
+    .table-scroll th {{ position: sticky; top: 0; background: #f5f7fa; z-index: 1; }}
   </style>
 </head>
 <body>
@@ -247,16 +289,24 @@ def generate_html(output_path: Path):
         cur, pre = wk["metrics"][name]
         if name in ["CTR", "ATC", "CVR"]:
             val_str = fmt_pct(cur)
-            delta_str = fmt_pct(safe_pct_change(cur, pre))
         else:
             val_str = fmt_num(cur)
-            delta_str = fmt_pct(safe_pct_change(cur, pre))
+        delta = safe_pct_change(cur, pre)
+        delta_str = fmt_pct(delta)
+        if pd.isna(delta):
+            delta_cls = "kpi-delta"
+        elif delta > 0:
+            delta_cls = "kpi-delta kpi-up"
+        elif delta < 0:
+            delta_cls = "kpi-delta kpi-down"
+        else:
+            delta_cls = "kpi-delta"
         html_parts.append(
             f"""
     <div class="kpi-card">
       <div class="kpi-label">{name}</div>
       <div class="kpi-value">{val_str}</div>
-      <div class="kpi-delta">环比：{delta_str}</div>
+      <div class="{delta_cls}">环比：{delta_str}</div>
     </div>
 """
         )
@@ -272,6 +322,12 @@ def generate_html(output_path: Path):
     fig_html_uvv = pio.to_html(
         fig_uvv, include_plotlyjs=False, full_html=False
     )
+    fig_html_t0 = pio.to_html(
+        fig_t0, include_plotlyjs=False, full_html=False
+    )
+    fig_html_t1 = pio.to_html(
+        fig_t1, include_plotlyjs=False, full_html=False
+    )
     fig_html_t2 = pio.to_html(
         fig_t2, include_plotlyjs=False, full_html=False
     )
@@ -284,17 +340,46 @@ def generate_html(output_path: Path):
 
     # 3) 搜索类型周环比（全链路）
     html_parts.append('<h2>3) 搜索类型周环比（全链路）</h2>')
+    html_parts.append(fig_html_t0)
+    html_parts.append(fig_html_t1)
     html_parts.append(fig_html_t2)
 
-    # 品类散点图
-    if cate_figs:
-        # 4) 热词与自然词分析
-        html_parts.append('<h2>4) 热词与自然词分析</h2>')
-        for title_cate, fig in cate_figs:
-            html_parts.append(f"<h3>{title_cate}</h3>")
-            html_parts.append(
-                pio.to_html(fig, include_plotlyjs=False, full_html=False)
-            )
+    # 4) 热词与自然词分析
+    html_parts.append('<h2>4) 热词与自然词分析</h2>')
+    for cate, fig_hot, data_hot, fig_nat, data_nat in cate_blocks:
+        html_parts.append(f"<h3>{cate}</h3>")
+
+        html_parts.append(f"<h4>{cate} - 热词分析</h4>")
+        if fig_hot is None:
+            html_parts.append("<p class='small'>该品类暂无热词数据。</p>")
+        else:
+            html_parts.append(pio.to_html(fig_hot, include_plotlyjs=False, full_html=False))
+            good_hot, bad_hot, basis_hot = split_keyword_perf_groups(data_hot)
+            if basis_hot == "无环比":
+                html_parts.append(table_html(data_hot))
+            else:
+                html_parts.append(
+                    f"""<div style="display:flex;gap:16px;align-items:flex-start;">
+<div style="flex:1;min-width:0;"><h5>表现较好（{basis_hot} ≥ 0）</h5>{table_html(good_hot)}</div>
+<div style="flex:1;min-width:0;"><h5>表现较弱（{basis_hot} < 0）</h5>{table_html(bad_hot)}</div>
+</div>"""
+                )
+
+        html_parts.append(f"<h4>{cate} - 自然词分析</h4>")
+        if fig_nat is None:
+            html_parts.append("<p class='small'>该品类暂无自然词数据（按末尾品类提取后为空）。</p>")
+        else:
+            html_parts.append(pio.to_html(fig_nat, include_plotlyjs=False, full_html=False))
+            good_nat, bad_nat, basis_nat = split_keyword_perf_groups(data_nat)
+            if basis_nat == "无环比":
+                html_parts.append(table_html(data_nat))
+            else:
+                html_parts.append(
+                    f"""<div style="display:flex;gap:16px;align-items:flex-start;">
+<div style="flex:1;min-width:0;"><h5>表现较好（{basis_nat} ≥ 0）</h5>{table_html(good_nat)}</div>
+<div style="flex:1;min-width:0;"><h5>表现较弱（{basis_nat} < 0）</h5>{table_html(bad_nat)}</div>
+</div>"""
+                )
 
     html_parts.append("</body></html>")
 

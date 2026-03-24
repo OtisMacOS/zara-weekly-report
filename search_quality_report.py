@@ -169,8 +169,8 @@ def format_pct_change(val):
     """格式化环比百分比值"""
     if pd.isna(val):
         return ""
-    pct_str = f"{abs(val):.1%}"
-    return f"{'↑' if val > 0 else '↓'}{pct_str}" if val != 0 else "→0%"
+    # 仅保留整数百分比（带正负号）
+    return f"{val:.0%}"
 
 
 def format_cell_with_change(value, change, is_pct=False):
@@ -198,10 +198,23 @@ def format_cell_with_change(value, change, is_pct=False):
 def style_change_cell(val):
     """为包含环比的单元格添加颜色样式"""
     if isinstance(val, str):
+        # 旧格式：带箭头符号
         if '↑' in val:
             return 'color: green'
         elif '↓' in val:
             return 'color: red'
+        # 新格式：纯百分比，如 "5%"、"-12%"
+        if val.endswith("%"):
+            try:
+                num = float(val.replace("%", ""))
+                frac = num / 100.0
+                # 仅当绝对值 >= 30% 时着色
+                if frac >= 0.3:
+                    return 'color: green'
+                elif frac <= -0.3:
+                    return 'color: red'
+            except ValueError:
+                pass
     return ''
 
 
@@ -212,6 +225,37 @@ def display_keyword_table(data: pd.DataFrame):
     
     output_data = data.copy()
     styled_cols = []
+    
+    # 计算综合得分：CTR*5 + ATC*4 + CVR*3
+    # 注意：这里按照「去掉百分号后的数值」来算，
+    # 即 57% 作为 57 而不是 0.57，所以要先乘以 100
+    score_cur = None
+    score_pre = None
+    if all(col in data.columns for col in ["CTR", "ATC", "CVR"]):
+        # 当前周得分
+        score_cur = (
+            data["CTR"].fillna(0) * 100 * 5
+            + data["ATC"].fillna(0) * 100 * 4
+            + data["CVR"].fillna(0) * 100 * 3
+        )
+        output_data["得分"] = score_cur.round(0).astype(int)
+
+        # 如果有 CTR/ATC/CVR 的环比列，则反推上一周得分并计算得分环比
+        if all(col in data.columns for col in ["CTR_change", "ATC_change", "CVR_change"]):
+            # pre = cur / (1 + change)，其中 change = (cur - pre) / pre
+            with np.errstate(divide="ignore", invalid="ignore"):
+                ctr_pre = data["CTR"] / (1 + data["CTR_change"])
+                atc_pre = data["ATC"] / (1 + data["ATC_change"])
+                cvr_pre = data["CVR"] / (1 + data["CVR_change"])
+
+            score_pre = (
+                ctr_pre.fillna(0) * 100 * 5
+                + atc_pre.fillna(0) * 100 * 4
+                + cvr_pre.fillna(0) * 100 * 3
+            )
+            with np.errstate(divide="ignore", invalid="ignore"):
+                score_change = (score_cur - score_pre) / score_pre.replace(0, np.nan)
+            output_data["得分_change"] = score_change
     
     # 为每个指标创建合并显示列（主值+环比）
     metrics_config = [
@@ -225,20 +269,63 @@ def display_keyword_table(data: pd.DataFrame):
     for col, is_pct in metrics_config:
         change_col = f"{col}_change"
         if col in output_data.columns and change_col in output_data.columns:
-            output_data[col] = output_data.apply(
-                lambda row: format_cell_with_change(row[col], row[change_col], is_pct),
-                axis=1
-            )
-            styled_cols.append(col)
+            # 主列只显示当前值，新增一列单独显示环比
+            if is_pct:
+                # 百分比主值精度：CVR 保留一位小数，其它（CTR/ATC）取整
+                if col == "CVR":
+                    output_data[col] = output_data[col].apply(
+                        lambda x: f"{x:.1%}" if pd.notna(x) else "-"
+                    )
+                else:
+                    output_data[col] = output_data[col].apply(
+                        lambda x: f"{x:.0%}" if pd.notna(x) else "-"
+                    )
+            else:
+                output_data[col] = output_data[col].apply(
+                    lambda x: f"{x:,.0f}" if pd.notna(x) else "-"
+                )
+            change_display_col = f"{col}_环比"
+            # 环比列按指标区分精度：CVR 保留一位小数，其它（CTR/ATC）保留整数
+            if col == "CVR":
+                output_data[change_display_col] = output_data[change_col].apply(
+                    lambda v: "" if pd.isna(v) else f"{v:.1%}"
+                )
+            else:
+                output_data[change_display_col] = output_data[change_col].apply(
+                    lambda v: "" if pd.isna(v) else f"{v:.0%}"
+                )
+            styled_cols.append(change_display_col)
         elif col in output_data.columns:
             # 没有环比数据，只格式化主值
             if is_pct:
-                output_data[col] = output_data[col].apply(lambda x: f"{x:.2%}" if pd.notna(x) else "-")
+                if col == "CVR":
+                    output_data[col] = output_data[col].apply(
+                        lambda x: f"{x:.1%}" if pd.notna(x) else "-"
+                    )
+                else:
+                    output_data[col] = output_data[col].apply(
+                        lambda x: f"{x:.0%}" if pd.notna(x) else "-"
+                    )
             else:
                 output_data[col] = output_data[col].apply(lambda x: f"{x:,.0f}" if pd.notna(x) else "-")
     
-    # 只保留需要显示的列
-    display_cols = ["关键词", "搜索PV", "搜索UV", "CTR", "ATC", "CVR"]
+    # 只保留需要显示的列：指标值 + 对应环比列（如果存在）
+    display_cols = ["关键词"]
+    for col, _ in metrics_config:
+        if col in output_data.columns:
+            display_cols.append(col)
+        change_display_col = f"{col}_环比"
+        if change_display_col in output_data.columns:
+            display_cols.append(change_display_col)
+    if "得分" in output_data.columns:
+        display_cols.append("得分")
+        if "得分_change" in output_data.columns:
+            # 得分环比列，统一用整数百分比
+            output_data["得分_环比"] = output_data["得分_change"].apply(
+                lambda v: "" if pd.isna(v) else f"{v:.0%}"
+            )
+            display_cols.append("得分_环比")
+            styled_cols.append("得分_环比")
     result = output_data[[c for c in display_cols if c in output_data.columns]]
     
     return result, styled_cols
@@ -547,6 +634,54 @@ def contribution_summary(wk: dict, mini: pd.DataFrame):
     }
 
 
+def attach_keyword_score_change(df: pd.DataFrame) -> pd.DataFrame:
+    """为关键词明细补充「得分_change」，供散点分色与表格分栏（与 display_keyword_table 口径一致）。"""
+    if df is None or df.empty:
+        return df
+    out = df.copy()
+    if "得分_change" in out.columns:
+        return out
+    ctr_c = "CTR_cur" if "CTR_cur" in out.columns else "CTR"
+    atc_c = "ATC_cur" if "ATC_cur" in out.columns else "ATC"
+    cvr_c = "CVR_cur" if "CVR_cur" in out.columns else "CVR"
+    if not all(c in out.columns for c in [ctr_c, atc_c, cvr_c]):
+        return out
+    score_cur = (
+        out[ctr_c].fillna(0) * 100 * 5
+        + out[atc_c].fillna(0) * 100 * 4
+        + out[cvr_c].fillna(0) * 100 * 3
+    )
+    if all(c in out.columns for c in ["CTR_change", "ATC_change", "CVR_change"]):
+        with np.errstate(divide="ignore", invalid="ignore"):
+            ctr_pre = out[ctr_c] / (1 + out["CTR_change"])
+            atc_pre = out[atc_c] / (1 + out["ATC_change"])
+            cvr_pre = out[cvr_c] / (1 + out["CVR_change"])
+        score_pre = (
+            ctr_pre.fillna(0) * 100 * 5
+            + atc_pre.fillna(0) * 100 * 4
+            + cvr_pre.fillna(0) * 100 * 3
+        )
+        with np.errstate(divide="ignore", invalid="ignore"):
+            out["得分_change"] = (score_cur - score_pre) / score_pre.replace(0, np.nan)
+    return out
+
+
+def split_keyword_perf_groups(df: pd.DataFrame):
+    """按得分环比拆分好/差词；无得分环比时退回 CTR 环比。环比为 NaN 的归入「较好」一侧以便仍能展示。"""
+    if df is None or df.empty:
+        return pd.DataFrame(), pd.DataFrame(), "无环比"
+    d = attach_keyword_score_change(df.copy())
+    if "得分_change" in d.columns:
+        good = d[(d["得分_change"] >= 0) | d["得分_change"].isna()]
+        bad = d[d["得分_change"] < 0]
+        return good, bad, "得分环比"
+    if "CTR_change" in d.columns:
+        good = d[(d["CTR_change"] >= 0) | d["CTR_change"].isna()]
+        bad = d[d["CTR_change"] < 0]
+        return good, bad, "CTR环比"
+    return d, pd.DataFrame(), "无环比"
+
+
 def type_weekly_summary(zara_by_type_cur: pd.DataFrame, zara_by_type_pre: pd.DataFrame = None):
     """从分离的当前周和上周数据汇总搜索类型周环比"""
     gcols = ["搜索UV", "点击UV", "加购UV", "购买人数", "购买总金额"]
@@ -605,14 +740,20 @@ def category_scatter(df: pd.DataFrame, cate: str, title: str):
     
     # 显示全部词标签，大小缩小40%
     sub["标签"] = sub["关键词"]
-    
+    sub = attach_keyword_score_change(sub)
+
     fig = go.Figure()
 
-    # 根据 CTR 环比区分表现好/差的词，使用不同颜色
+    # 根据「得分环比」区分表现好/差的词，使用不同颜色（若无得分环比，则退化为 CTR 环比）
+    has_score_change = "得分_change" in sub.columns
     has_ctr_change = "CTR_change" in sub.columns
-    if has_ctr_change:
-        good_mask = sub["CTR_change"] >= 0
-        bad_mask = sub["CTR_change"] < 0
+    if has_score_change or has_ctr_change:
+        if has_score_change:
+            good_mask = sub["得分_change"] >= 0
+            bad_mask = sub["得分_change"] < 0
+        else:
+            good_mask = sub["CTR_change"] >= 0
+            bad_mask = sub["CTR_change"] < 0
 
         good_sub = sub[good_mask]
         bad_sub = sub[bad_mask]
@@ -623,7 +764,7 @@ def category_scatter(df: pd.DataFrame, cate: str, title: str):
                     x=good_sub[ctr_col],
                     y=good_sub[cvr_col],
                     mode="markers+text",
-                    name="表现较好（CTR 环比 ≥ 0）",
+                    name="表现较好（得分环比 ≥ 0）",
                     text=good_sub["标签"],
                     textposition="top center",
                     textfont=dict(size=8),
@@ -646,7 +787,7 @@ def category_scatter(df: pd.DataFrame, cate: str, title: str):
                     x=bad_sub[ctr_col],
                     y=bad_sub[cvr_col],
                     mode="markers+text",
-                    name="表现较弱（CTR 环比 < 0）",
+                    name="表现较弱（得分环比 < 0）",
                     text=bad_sub["标签"],
                     textposition="top center",
                     textfont=dict(size=8),
@@ -730,10 +871,29 @@ def category_scatter(df: pd.DataFrame, cate: str, title: str):
     # 选择合适的列组合（有_cur后缀表示有环比数据，否则只有当前周数据）
     if "搜索PV_cur" in sub.columns:
         # 有环比数据
-        table_data = sub[["关键词", "搜索PV_cur", "搜索UV_cur", "CTR_cur", "ATC_cur", "CVR_cur", 
-                          "搜索PV_change", "搜索UV_change", "CTR_change", "ATC_change", "CVR_change"]].copy()
-        table_data.columns = ["关键词", "搜索PV", "搜索UV", "CTR", "ATC", "CVR", 
-                             "搜索PV_change", "搜索UV_change", "CTR_change", "ATC_change", "CVR_change"]
+        cols = [
+            "关键词", "搜索PV_cur", "搜索UV_cur", "CTR_cur", "ATC_cur", "CVR_cur",
+            "搜索PV_change", "搜索UV_change", "CTR_change", "ATC_change", "CVR_change",
+        ]
+        if "得分_change" in sub.columns:
+            cols.append("得分_change")
+        table_data = sub[cols].copy()
+        rename = {
+            "关键词": "关键词",
+            "搜索PV_cur": "搜索PV",
+            "搜索UV_cur": "搜索UV",
+            "CTR_cur": "CTR",
+            "ATC_cur": "ATC",
+            "CVR_cur": "CVR",
+            "搜索PV_change": "搜索PV_change",
+            "搜索UV_change": "搜索UV_change",
+            "CTR_change": "CTR_change",
+            "ATC_change": "ATC_change",
+            "CVR_change": "CVR_change",
+        }
+        if "得分_change" in table_data.columns:
+            rename["得分_change"] = "得分_change"
+        table_data = table_data.rename(columns=rename)
     else:
         # 无环比数据
         table_data = sub[["关键词", "搜索PV", "搜索UV", "CTR", "ATC", "CVR"]].copy()
@@ -1244,14 +1404,12 @@ def render():
             st.info("该品类暂无热词数据。")
         else:
             st.plotly_chart(fig_hot, use_container_width=True)
-            # 显示热词数据表格：按 CTR 环比区分「表现好」和「表现差」
-            if "CTR_change" in data_hot.columns:
+            # 显示热词数据表格：按得分环比（或 CTR 环比）区分表现好/差
+            good_df, bad_df, perf_basis = split_keyword_perf_groups(data_hot)
+            if perf_basis != "无环比":
                 col_good, col_bad = st.columns(2)
-                good_df = data_hot[data_hot["CTR_change"] >= 0]
-                bad_df = data_hot[data_hot["CTR_change"] < 0]
-
                 with col_good:
-                    st.markdown("表现较好（CTR 环比 ≥ 0）")
+                    st.markdown(f"表现较好（{perf_basis} ≥ 0）")
                     if good_df.empty:
                         st.caption("暂无符合条件的词。")
                     else:
@@ -1265,7 +1423,7 @@ def render():
                         )
 
                 with col_bad:
-                    st.markdown("表现较弱（CTR 环比 < 0）")
+                    st.markdown(f"表现较弱（{perf_basis} < 0）")
                     if bad_df.empty:
                         st.caption("暂无符合条件的词。")
                     else:
@@ -1294,14 +1452,12 @@ def render():
             st.info("该品类暂无自然词数据（按末尾品类提取后为空）。")
         else:
             st.plotly_chart(fig_nat, use_container_width=True)
-            # 显示自然词数据表格：按 CTR 环比区分「表现好」和「表现差」
-            if "CTR_change" in data_nat.columns:
+            # 显示自然词数据表格：按得分环比（或 CTR 环比）区分表现好/差
+            good_nat, bad_nat, perf_basis_n = split_keyword_perf_groups(data_nat)
+            if perf_basis_n != "无环比":
                 col_good_n, col_bad_n = st.columns(2)
-                good_nat = data_nat[data_nat["CTR_change"] >= 0]
-                bad_nat = data_nat[data_nat["CTR_change"] < 0]
-
                 with col_good_n:
-                    st.markdown("表现较好（CTR 环比 ≥ 0）")
+                    st.markdown(f"表现较好（{perf_basis_n} ≥ 0）")
                     if good_nat.empty:
                         st.caption("暂无符合条件的词。")
                     else:
@@ -1315,7 +1471,7 @@ def render():
                         )
 
                 with col_bad_n:
-                    st.markdown("表现较弱（CTR 环比 < 0）")
+                    st.markdown(f"表现较弱（{perf_basis_n} < 0）")
                     if bad_nat.empty:
                         st.caption("暂无符合条件的词。")
                     else:
