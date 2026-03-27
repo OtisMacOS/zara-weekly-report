@@ -683,7 +683,15 @@ def split_keyword_perf_groups(df: pd.DataFrame):
 
 
 def type_weekly_summary(zara_by_type_cur: pd.DataFrame, zara_by_type_pre: pd.DataFrame = None):
-    """从分离的当前周和上周数据汇总搜索类型周环比"""
+    """从分离的当前周和上周数据汇总搜索类型周环比。
+
+    口径（与「先日均再平均」不同）：每个操作类型在本周/上周内，先把约 7 天的 UV 等指标按列求和，
+    再计算比率——即加权口径：
+    - CTR = sum(点击UV) / sum(搜索UV)
+    - ATC = sum(加购UV) / sum(搜索UV)
+    - CVR = sum(购买人数) / sum(搜索UV)
+    金额占比等为 sum(购买总金额) 在类型间的占比，同理基于周汇总而非日均平均。
+    """
     gcols = ["搜索UV", "点击UV", "加购UV", "购买人数", "购买总金额"]
     
     cur_g = zara_by_type_cur.groupby("操作类型", as_index=False)[gcols].sum()
