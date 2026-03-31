@@ -257,6 +257,12 @@ def display_keyword_table(data: pd.DataFrame):
                 score_change = (score_cur - score_pre) / score_pre.replace(0, np.nan)
             output_data["得分_change"] = score_change
     
+    # 上架天数（热词表常见字段）：仅展示当前值，不参与环比
+    if "上架天数" in output_data.columns:
+        output_data["上架天数"] = output_data["上架天数"].apply(
+            lambda x: f"{x:,.0f}" if pd.notna(x) else "-"
+        )
+
     # 为每个指标创建合并显示列（主值+环比）
     metrics_config = [
         ("搜索PV", False),
@@ -311,6 +317,8 @@ def display_keyword_table(data: pd.DataFrame):
     
     # 只保留需要显示的列：指标值 + 对应环比列（如果存在）
     display_cols = ["关键词"]
+    if "上架天数" in output_data.columns:
+        display_cols.append("上架天数")
     for col, _ in metrics_config:
         if col in output_data.columns:
             display_cols.append(col)
@@ -429,6 +437,11 @@ def load_data(paths: dict):
             if kw_col in df_cur.columns:
                 df_cur = df_cur.dropna(subset=[kw_col]).copy()
                 df_cur = df_cur.rename(columns={kw_col: "关键词", "购买UV": "购买人数"})
+                days_col = find_col(df_cur, ["上架天数", "上架天数(天)"])
+                if days_col and days_col != "上架天数":
+                    df_cur = df_cur.rename(columns={days_col: "上架天数"})
+                if "上架天数" in df_cur.columns:
+                    df_cur["上架天数"] = pd.to_numeric(df_cur["上架天数"], errors="coerce")
                 df_cur["品类"] = category
                 df_cur = to_num(df_cur, ["搜索PV", "搜索UV", "点击UV", "加购UV", "购买人数"])
                 df_cur["购买总金额"] = np.nan
@@ -883,6 +896,8 @@ def category_scatter(df: pd.DataFrame, cate: str, title: str):
             "关键词", "搜索PV_cur", "搜索UV_cur", "CTR_cur", "ATC_cur", "CVR_cur",
             "搜索PV_change", "搜索UV_change", "CTR_change", "ATC_change", "CVR_change",
         ]
+        if "上架天数" in sub.columns:
+            cols.insert(1, "上架天数")
         if "得分_change" in sub.columns:
             cols.append("得分_change")
         table_data = sub[cols].copy()
@@ -904,7 +919,10 @@ def category_scatter(df: pd.DataFrame, cate: str, title: str):
         table_data = table_data.rename(columns=rename)
     else:
         # 无环比数据
-        table_data = sub[["关键词", "搜索PV", "搜索UV", "CTR", "ATC", "CVR"]].copy()
+        base_cols = ["关键词", "搜索PV", "搜索UV", "CTR", "ATC", "CVR"]
+        if "上架天数" in sub.columns:
+            base_cols.insert(1, "上架天数")
+        table_data = sub[base_cols].copy()
     
     table_data = table_data.sort_values("搜索PV", ascending=False).reset_index(drop=True)
     
