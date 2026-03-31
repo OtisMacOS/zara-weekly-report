@@ -126,6 +126,10 @@ DEFAULT_PATHS = build_default_paths()
 TYPE_VALUE_COLS = ["搜索UV", "点击UV", "加购UV", "购买人数", "购买总金额"]
 CATEGORIES = ["女士", "男士", "儿童", "家居"]
 
+# 自然搜索词：女士 Top100（图表按每页 20 词分页）；其余品类仍 Top30
+NATURAL_TOPN_BY_CATE = {"女士": 100, "男士": 30, "儿童": 30, "家居": 30}
+NATURAL_WOMEN_PAGE_SIZE = 20
+
 
 def to_num(df: pd.DataFrame, cols):
     for col in cols:
@@ -551,12 +555,13 @@ def load_data(paths: dict):
                         merged[f"{col}_change"] = (merged[f"{col}_cur"] - merged[f"{col}_pre"]) / merged[f"{col}_pre"].replace(0, np.nan)
                 df_cur = merged
             
-            # 每个品类只保留top30个自然搜索词
+            # 每个品类保留 TopN 个自然搜索词（女士 100，其余 30）
             # 注意：merge后列名可能变成 搜索PV_cur，需要判断
             pv_sort_col = "搜索PV_cur" if "搜索PV_cur" in df_cur.columns else "搜索PV"
             natural_words_list = []
             for cat in CATEGORIES:
-                cat_data = df_cur[df_cur["品类"] == cat].nlargest(30, pv_sort_col)
+                topn = NATURAL_TOPN_BY_CATE.get(cat, 30)
+                cat_data = df_cur[df_cur["品类"] == cat].nlargest(topn, pv_sort_col)
                 natural_words_list.append(cat_data)
             natural_words = pd.concat(natural_words_list, ignore_index=True) if natural_words_list else df_cur
 
@@ -728,36 +733,63 @@ def type_weekly_summary(zara_by_type_cur: pd.DataFrame, zara_by_type_pre: pd.Dat
     return merged
 
 
-def category_scatter(df: pd.DataFrame, cate: str, title: str):
-    if df is None or df.empty or "品类" not in df.columns:
-        return None, None
-    sub = df[df["品类"] == cate].copy()
-    if sub.empty:
-        return None, None
+def category_scatter(
+    df: pd.DataFrame,
+    cate: str,
+    title: str,
+    top_n=30,
+    plot_df=None,
+    ref_pool_for_avg=None,
+    bubble_max_df=None,
+):
+    """
+    散点图：默认取该品类 TopN 词。若传入 plot_df，则只绘制该子集；
+    ref_pool_for_avg 用于平均 CTR/CVR 虚线（如女士 Top100 全量）；
+    bubble_max_df 用于气泡最大 PV 归一化（可与 ref_pool 一致以便跨页可比）。
+    """
+    if plot_df is not None:
+        sub = plot_df.copy()
+        if sub.empty:
+            return None, None
+    else:
+        if df is None or df.empty or "品类" not in df.columns:
+            return None, None
+        sub = df[df["品类"] == cate].copy()
+        if sub.empty:
+            return None, None
+        pv_pick = "搜索PV_cur" if "搜索PV_cur" in sub.columns else "搜索PV"
+        sub = sub.nlargest(top_n, pv_pick).copy()
+
     sub = sub.fillna(0)
-    
-    # 确定搜索PV列名（merge后可能是搜索PV_cur）
+
     pv_col = "搜索PV_cur" if "搜索PV_cur" in sub.columns else "搜索PV"
-    
-    # 只显示该品类的top30个关键词（按搜索PV排序）
-    sub = sub.nlargest(30, pv_col).copy()
-    
-    # 在该品类内部进行气泡大小排序（搜索PV最大的词圆圈最大）
-    max_pv = sub[pv_col].max()
+
+    pool_avg = ref_pool_for_avg.copy() if ref_pool_for_avg is not None else sub.copy()
+    pool_avg = pool_avg.fillna(0)
+
+    max_src = bubble_max_df.copy() if bubble_max_df is not None else sub.copy()
+    max_src = max_src.fillna(0)
+    if len(max_src) and pv_col in max_src.columns:
+        max_pv = max_src[pv_col].max()
+    else:
+        max_pv = 0
+    if max_pv == 0 and len(sub) and pv_col in sub.columns:
+        max_pv = sub[pv_col].max()
+
     if max_pv == 0:
         sub["bubble_size"] = 20
     else:
         sub["bubble_size"] = np.clip(sub[pv_col] / max_pv * 50 + 8, 8, 60)
-    
-    # 确定其他指标列名
+
     uv_col = "搜索UV_cur" if "搜索UV_cur" in sub.columns else "搜索UV"
     ctr_col = "CTR_cur" if "CTR_cur" in sub.columns else "CTR"
     cvr_col = "CVR_cur" if "CVR_cur" in sub.columns else "CVR"
     atc_col = "ATC_cur" if "ATC_cur" in sub.columns else "ATC"
-    
-    avg_ctr = sub[ctr_col].mean()
-    avg_cvr = sub[cvr_col].mean()
+
+    avg_ctr = pool_avg[ctr_col].mean() if len(pool_avg) else np.nan
+    avg_cvr = pool_avg[cvr_col].mean() if len(pool_avg) else np.nan
     word_count = len(sub)
+    pool_total = len(pool_avg) if ref_pool_for_avg is not None else word_count
     
     # 显示全部词标签，大小缩小40%
     sub["标签"] = sub["关键词"]
@@ -871,8 +903,12 @@ def category_scatter(df: pd.DataFrame, cate: str, title: str):
             yanchor="middle",
         )
     
+    if ref_pool_for_avg is not None:
+        ann_note = f"本页词数: {word_count}/{pool_total}（均值线=Top{pool_total} 平均CTR/CVR）"
+    else:
+        ann_note = f"图表中词数: {word_count}/全量数据"
     fig.add_annotation(
-        text=f"图表中词数: {word_count}/全量数据",
+        text=ann_note,
         xref="paper",
         yref="paper",
         x=0.02,
@@ -927,6 +963,18 @@ def category_scatter(df: pd.DataFrame, cate: str, title: str):
     table_data = table_data.sort_values("搜索PV", ascending=False).reset_index(drop=True)
     
     return fig, table_data
+
+
+def women_natural_top_pool(natural_words: pd.DataFrame) -> pd.DataFrame:
+    """女士自然词 TopN（与 load_data 一致，按搜索PV），供分页图表与离线 HTML。"""
+    if natural_words is None or natural_words.empty:
+        return pd.DataFrame()
+    w = natural_words[natural_words["品类"] == "女士"].copy()
+    if w.empty:
+        return w
+    pv = "搜索PV_cur" if "搜索PV_cur" in w.columns else "搜索PV"
+    n = NATURAL_TOPN_BY_CATE.get("女士", 100)
+    return w.nlargest(n, pv).reset_index(drop=True)
 
 
 # ---------- 数据校验 ----------
@@ -1473,52 +1521,87 @@ def render():
                 )
 
         st.markdown(f"**{cate} - 自然词分析**")
-        fig_nat, data_nat = category_scatter(natural_words, cate, f"{cate} 自然词：CTR vs CVR（气泡=搜索PV）")
-        if fig_nat is None:
-            st.info("该品类暂无自然词数据（按末尾品类提取后为空）。")
-        else:
-            st.plotly_chart(fig_nat, use_container_width=True)
-            # 显示自然词数据表格：按得分环比（或 CTR 环比）区分表现好/差
-            good_nat, bad_nat, perf_basis_n = split_keyword_perf_groups(data_nat)
-            if perf_basis_n != "无环比":
-                col_good_n, col_bad_n = st.columns(2)
-                with col_good_n:
-                    st.markdown(f"表现上升（{perf_basis_n} ≥ 0）")
-                    if good_nat.empty:
-                        st.caption("暂无符合条件的词。")
-                    else:
-                        table_data_gn, styled_cols_gn = display_keyword_table(good_nat)
-                        styled_df_gn = table_data_gn.style.applymap(style_change_cell, subset=styled_cols_gn)
-                        st.dataframe(
-                            styled_df_gn,
-                            use_container_width=True,
-                            height=380,
-                            hide_index=True,
-                        )
-
-                with col_bad_n:
-                    st.markdown(f"表现下降（{perf_basis_n} < 0）")
-                    if bad_nat.empty:
-                        st.caption("暂无符合条件的词。")
-                    else:
-                        table_data_bn, styled_cols_bn = display_keyword_table(bad_nat)
-                        styled_df_bn = table_data_bn.style.applymap(style_change_cell, subset=styled_cols_bn)
-                        st.dataframe(
-                            styled_df_bn,
-                            use_container_width=True,
-                            height=380,
-                            hide_index=True,
-                        )
+        fig_nat, data_nat = None, None
+        women_natural_skip_tables = False
+        if cate == "女士":
+            pool_w = women_natural_top_pool(natural_words)
+            if pool_w.empty:
+                st.info("该品类暂无自然词数据（按末尾品类提取后为空）。")
+                women_natural_skip_tables = True
             else:
-                # 无环比数据时，保持原有单表展示
-                table_data_nat, styled_cols_nat = display_keyword_table(data_nat)
-                styled_df_nat = table_data_nat.style.applymap(style_change_cell, subset=styled_cols_nat)
-                st.dataframe(
-                    styled_df_nat,
-                    use_container_width=True,
-                    height=400,
-                    hide_index=True,
+                n_pool = len(pool_w)
+                page_labels = [
+                    f"{i + 1}-{min(i + NATURAL_WOMEN_PAGE_SIZE, n_pool)}"
+                    for i in range(0, n_pool, NATURAL_WOMEN_PAGE_SIZE)
+                ]
+                seg = st.radio(
+                    "女士自然词分段（按搜索PV Top100，每页 20 词；均值线=全部 Top 词平均 CTR/CVR）",
+                    page_labels,
+                    horizontal=True,
+                    key="women_natural_segment",
                 )
+                lo = page_labels.index(seg) * NATURAL_WOMEN_PAGE_SIZE
+                hi = min(lo + NATURAL_WOMEN_PAGE_SIZE, n_pool)
+                page_df = pool_w.iloc[lo:hi].copy()
+                title_nat = f"{cate} 自然词：CTR vs CVR（气泡=搜索PV）｜{seg} / Top{n_pool}"
+                fig_nat, data_nat = category_scatter(
+                    natural_words,
+                    cate,
+                    title_nat,
+                    plot_df=page_df,
+                    ref_pool_for_avg=pool_w,
+                    bubble_max_df=pool_w,
+                )
+        else:
+            fig_nat, data_nat = category_scatter(
+                natural_words, cate, f"{cate} 自然词：CTR vs CVR（气泡=搜索PV）"
+            )
+
+        if not women_natural_skip_tables:
+            if fig_nat is None:
+                st.info("该品类暂无自然词数据（按末尾品类提取后为空）。")
+            else:
+                st.plotly_chart(fig_nat, use_container_width=True)
+                # 显示自然词数据表格：按得分环比（或 CTR 环比）区分表现好/差（与当前页/当前图一致）
+                good_nat, bad_nat, perf_basis_n = split_keyword_perf_groups(data_nat)
+                if perf_basis_n != "无环比":
+                    col_good_n, col_bad_n = st.columns(2)
+                    with col_good_n:
+                        st.markdown(f"表现上升（{perf_basis_n} ≥ 0）")
+                        if good_nat.empty:
+                            st.caption("暂无符合条件的词。")
+                        else:
+                            table_data_gn, styled_cols_gn = display_keyword_table(good_nat)
+                            styled_df_gn = table_data_gn.style.applymap(style_change_cell, subset=styled_cols_gn)
+                            st.dataframe(
+                                styled_df_gn,
+                                use_container_width=True,
+                                height=380,
+                                hide_index=True,
+                            )
+
+                    with col_bad_n:
+                        st.markdown(f"表现下降（{perf_basis_n} < 0）")
+                        if bad_nat.empty:
+                            st.caption("暂无符合条件的词。")
+                        else:
+                            table_data_bn, styled_cols_bn = display_keyword_table(bad_nat)
+                            styled_df_bn = table_data_bn.style.applymap(style_change_cell, subset=styled_cols_bn)
+                            st.dataframe(
+                                styled_df_bn,
+                                use_container_width=True,
+                                height=380,
+                                hide_index=True,
+                            )
+                else:
+                    table_data_nat, styled_cols_nat = display_keyword_table(data_nat)
+                    styled_df_nat = table_data_nat.style.applymap(style_change_cell, subset=styled_cols_nat)
+                    st.dataframe(
+                        styled_df_nat,
+                        use_container_width=True,
+                        height=400,
+                        hide_index=True,
+                    )
 
     st.subheader("5) 数据校验")
     disp_checks = run_display_consistency_checks(wk, contrib, by_type, zara_daily_cur, zara_daily_pre, mini, zara_by_type_cur, zara_by_type_pre)

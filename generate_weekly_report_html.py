@@ -9,11 +9,13 @@ import plotly.io as pio
 from search_quality_report import (
     DEFAULT_PATHS,
     CATEGORIES,
+    NATURAL_WOMEN_PAGE_SIZE,
     load_data,
     weekly_from_daily,
     contribution_summary,
     type_weekly_summary,
     category_scatter,
+    women_natural_top_pool,
     display_keyword_table,
     style_change_cell,
     split_keyword_perf_groups,
@@ -232,16 +234,39 @@ def generate_html(output_path: Path):
 
     fig_rate, fig_share, fig_uvv, fig_t0, fig_t1, fig_t2 = build_core_figures(wk, contrib, by_type)
 
-    # 各品类热词 / 自然词散点图 + 分组表格
+    # 各品类热词 / 自然词散点图 + 分组表格（女士自然词：Top100 拆 5 段 × 20 词）
     cate_blocks = []
     for cate in CATEGORIES:
         fig_hot, data_hot = category_scatter(
             hotwords, cate, f"{cate} 热词：CTR vs CVR（气泡=搜索PV）"
         )
-        fig_nat, data_nat = category_scatter(
-            natural_words, cate, f"{cate} 自然词：CTR vs CVR（气泡=搜索PV）"
-        )
-        cate_blocks.append((cate, fig_hot, data_hot, fig_nat, data_nat))
+        nat_parts = []
+        if cate == "女士":
+            pool_w = women_natural_top_pool(natural_words)
+            if pool_w.empty:
+                nat_parts.append((None, None, None, 0))
+            else:
+                n_pool = len(pool_w)
+                for i in range(0, n_pool, NATURAL_WOMEN_PAGE_SIZE):
+                    end = min(i + NATURAL_WOMEN_PAGE_SIZE, n_pool)
+                    label = f"{i + 1}-{end}"
+                    page_df = pool_w.iloc[i:end].copy()
+                    title = f"{cate} 自然词：CTR vs CVR（气泡=搜索PV）｜{label} / Top{n_pool}"
+                    fig_n, data_n = category_scatter(
+                        natural_words,
+                        cate,
+                        title,
+                        plot_df=page_df,
+                        ref_pool_for_avg=pool_w,
+                        bubble_max_df=pool_w,
+                    )
+                    nat_parts.append((fig_n, data_n, label, n_pool))
+        else:
+            fig_nat, data_nat = category_scatter(
+                natural_words, cate, f"{cate} 自然词：CTR vs CVR（气泡=搜索PV）"
+            )
+            nat_parts.append((fig_nat, data_nat, None, 0))
+        cate_blocks.append((cate, fig_hot, data_hot, nat_parts))
 
     # 生成 HTML
     html_parts = []
@@ -346,7 +371,7 @@ def generate_html(output_path: Path):
 
     # 4) 热词与自然词分析
     html_parts.append('<h2>4) 热词与自然词分析</h2>')
-    for cate, fig_hot, data_hot, fig_nat, data_nat in cate_blocks:
+    for cate, fig_hot, data_hot, nat_parts in cate_blocks:
         html_parts.append(f"<h3>{cate}</h3>")
 
         html_parts.append(f"<h4>{cate} - 热词分析</h4>")
@@ -366,9 +391,17 @@ def generate_html(output_path: Path):
                 )
 
         html_parts.append(f"<h4>{cate} - 自然词分析</h4>")
-        if fig_nat is None:
-            html_parts.append("<p class='small'>该品类暂无自然词数据（按末尾品类提取后为空）。</p>")
-        else:
+        for fig_nat, data_nat, seg_label, pool_n in nat_parts:
+            if fig_nat is None:
+                if cate == "女士" and pool_n == 0:
+                    html_parts.append("<p class='small'>该品类暂无自然词数据（按末尾品类提取后为空）。</p>")
+                elif cate != "女士":
+                    html_parts.append("<p class='small'>该品类暂无自然词数据（按末尾品类提取后为空）。</p>")
+                continue
+            if seg_label and pool_n:
+                html_parts.append(
+                    f"<h5>自然词分段 {seg_label} / Top{pool_n}（均值线=全 Top{pool_n}）</h5>"
+                )
             html_parts.append(pio.to_html(fig_nat, include_plotlyjs=False, full_html=False))
             good_nat, bad_nat, basis_nat = split_keyword_perf_groups(data_nat)
             if basis_nat == "无环比":
