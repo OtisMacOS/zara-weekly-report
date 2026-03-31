@@ -360,8 +360,8 @@ def generate_html(output_path: Path):
             else:
                 html_parts.append(
                     f"""<div style="display:flex;gap:16px;align-items:flex-start;">
-<div style="flex:1;min-width:0;"><h5>表现较好（{basis_hot} ≥ 0）</h5>{table_html(good_hot)}</div>
-<div style="flex:1;min-width:0;"><h5>表现较弱（{basis_hot} < 0）</h5>{table_html(bad_hot)}</div>
+<div style="flex:1;min-width:0;"><h5>表现上升（{basis_hot} ≥ 0）</h5>{table_html(good_hot)}</div>
+<div style="flex:1;min-width:0;"><h5>表现下降（{basis_hot} < 0）</h5>{table_html(bad_hot)}</div>
 </div>"""
                 )
 
@@ -376,8 +376,8 @@ def generate_html(output_path: Path):
             else:
                 html_parts.append(
                     f"""<div style="display:flex;gap:16px;align-items:flex-start;">
-<div style="flex:1;min-width:0;"><h5>表现较好（{basis_nat} ≥ 0）</h5>{table_html(good_nat)}</div>
-<div style="flex:1;min-width:0;"><h5>表现较弱（{basis_nat} < 0）</h5>{table_html(bad_nat)}</div>
+<div style="flex:1;min-width:0;"><h5>表现上升（{basis_nat} ≥ 0）</h5>{table_html(good_nat)}</div>
+<div style="flex:1;min-width:0;"><h5>表现下降（{basis_nat} < 0）</h5>{table_html(bad_nat)}</div>
 </div>"""
                 )
 

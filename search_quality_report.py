@@ -785,7 +785,7 @@ def category_scatter(df: pd.DataFrame, cate: str, title: str):
                     x=good_sub[ctr_col],
                     y=good_sub[cvr_col],
                     mode="markers+text",
-                    name="表现较好（得分环比 ≥ 0）",
+                    name="表现上升（得分环比 ≥ 0）",
                     text=good_sub["标签"],
                     textposition="top center",
                     textfont=dict(size=8),
@@ -808,7 +808,7 @@ def category_scatter(df: pd.DataFrame, cate: str, title: str):
                     x=bad_sub[ctr_col],
                     y=bad_sub[cvr_col],
                     mode="markers+text",
-                    name="表现较弱（得分环比 < 0）",
+                    name="表现下降（得分环比 < 0）",
                     text=bad_sub["标签"],
                     textposition="top center",
                     textfont=dict(size=8),
@@ -1435,7 +1435,7 @@ def render():
             if perf_basis != "无环比":
                 col_good, col_bad = st.columns(2)
                 with col_good:
-                    st.markdown(f"表现较好（{perf_basis} ≥ 0）")
+                    st.markdown(f"表现上升（{perf_basis} ≥ 0）")
                     if good_df.empty:
                         st.caption("暂无符合条件的词。")
                     else:
@@ -1449,7 +1449,7 @@ def render():
                         )
 
                 with col_bad:
-                    st.markdown(f"表现较弱（{perf_basis} < 0）")
+                    st.markdown(f"表现下降（{perf_basis} < 0）")
                     if bad_df.empty:
                         st.caption("暂无符合条件的词。")
                     else:
@@ -1483,7 +1483,7 @@ def render():
             if perf_basis_n != "无环比":
                 col_good_n, col_bad_n = st.columns(2)
                 with col_good_n:
-                    st.markdown(f"表现较好（{perf_basis_n} ≥ 0）")
+                    st.markdown(f"表现上升（{perf_basis_n} ≥ 0）")
                     if good_nat.empty:
                         st.caption("暂无符合条件的词。")
                     else:
@@ -1497,7 +1497,7 @@ def render():
                         )
 
                 with col_bad_n:
-                    st.markdown(f"表现较弱（{perf_basis_n} < 0）")
+                    st.markdown(f"表现下降（{perf_basis_n} < 0）")
                     if bad_nat.empty:
                         st.caption("暂无符合条件的词。")
                     else:
