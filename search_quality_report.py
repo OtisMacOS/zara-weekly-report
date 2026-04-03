@@ -222,6 +222,13 @@ def style_change_cell(val):
     return ''
 
 
+def apply_styler_change(styler, subset_cols):
+    """Streamlit Cloud 等环境多为 pandas≥2.1，Styler.applymap 已移除，须用 map；旧版仍用 applymap。"""
+    if hasattr(styler, "map"):
+        return styler.map(style_change_cell, subset=subset_cols)
+    return styler.applymap(style_change_cell, subset=subset_cols)
+
+
 def display_keyword_table(data: pd.DataFrame):
     """准备包含环比信息的表格数据，环比显示在同一单元格内"""
     if data.empty:
@@ -1488,7 +1495,7 @@ def render():
                         st.caption("暂无符合条件的词。")
                     else:
                         table_data_g, styled_cols_g = display_keyword_table(good_df)
-                        styled_df_g = table_data_g.style.applymap(style_change_cell, subset=styled_cols_g)
+                        styled_df_g = apply_styler_change(table_data_g.style, styled_cols_g)
                         st.dataframe(
                             styled_df_g,
                             use_container_width=True,
@@ -1502,7 +1509,7 @@ def render():
                         st.caption("暂无符合条件的词。")
                     else:
                         table_data_b, styled_cols_b = display_keyword_table(bad_df)
-                        styled_df_b = table_data_b.style.applymap(style_change_cell, subset=styled_cols_b)
+                        styled_df_b = apply_styler_change(table_data_b.style, styled_cols_b)
                         st.dataframe(
                             styled_df_b,
                             use_container_width=True,
@@ -1512,7 +1519,7 @@ def render():
             else:
                 # 无环比数据时，保持原有单表展示
                 table_data, styled_cols = display_keyword_table(data_hot)
-                styled_df = table_data.style.applymap(style_change_cell, subset=styled_cols)
+                styled_df = apply_styler_change(table_data.style, styled_cols)
                 st.dataframe(
                     styled_df,
                     use_container_width=True,
@@ -1572,7 +1579,7 @@ def render():
                             st.caption("暂无符合条件的词。")
                         else:
                             table_data_gn, styled_cols_gn = display_keyword_table(good_nat)
-                            styled_df_gn = table_data_gn.style.applymap(style_change_cell, subset=styled_cols_gn)
+                            styled_df_gn = apply_styler_change(table_data_gn.style, styled_cols_gn)
                             st.dataframe(
                                 styled_df_gn,
                                 use_container_width=True,
@@ -1586,7 +1593,7 @@ def render():
                             st.caption("暂无符合条件的词。")
                         else:
                             table_data_bn, styled_cols_bn = display_keyword_table(bad_nat)
-                            styled_df_bn = table_data_bn.style.applymap(style_change_cell, subset=styled_cols_bn)
+                            styled_df_bn = apply_styler_change(table_data_bn.style, styled_cols_bn)
                             st.dataframe(
                                 styled_df_bn,
                                 use_container_width=True,
@@ -1595,7 +1602,7 @@ def render():
                             )
                 else:
                     table_data_nat, styled_cols_nat = display_keyword_table(data_nat)
-                    styled_df_nat = table_data_nat.style.applymap(style_change_cell, subset=styled_cols_nat)
+                    styled_df_nat = apply_styler_change(table_data_nat.style, styled_cols_nat)
                     st.dataframe(
                         styled_df_nat,
                         use_container_width=True,
