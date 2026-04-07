@@ -752,7 +752,7 @@ def category_scatter(
     """
     散点图：默认取该品类 TopN 词。若传入 plot_df，则只绘制该子集；
     ref_pool_for_avg 用于平均 CTR/CVR 虚线（如女士 Top100 全量）；
-    bubble_max_df 用于气泡最大 PV 归一化（可与 ref_pool 一致以便跨页可比）。
+    bubble_max_df 若指定则用其 PV 最大值归一气泡（如女士分页时传 Top100 全池，各页气泡与全榜可比）；默认 None 表示用当前子集。
     """
     if plot_df is not None:
         sub = plot_df.copy()
@@ -1542,7 +1542,7 @@ def render():
                     for i in range(0, n_pool, NATURAL_WOMEN_PAGE_SIZE)
                 ]
                 seg = st.radio(
-                    "女士自然词分段（按搜索PV Top100，每页 20 词；均值线=全部 Top 词平均 CTR/CVR）",
+                    "女士自然词分段（按搜索PV Top100，每页 20 词；均值线与气泡大小均相对全部 Top 词）",
                     page_labels,
                     horizontal=True,
                     key="women_natural_segment",
