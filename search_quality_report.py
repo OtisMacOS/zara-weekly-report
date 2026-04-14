@@ -50,6 +50,21 @@ def find_hotword_periods(base_dir: Path) -> tuple:
     return None, None
 
 
+def find_homepage_config_periods(base_dir: Path) -> tuple:
+    """扫描首页配置词文件夹找到最新和次新的周期（目录名以「配置词」结尾）。"""
+    cfg_dir = base_dir / "首页配置词部分"
+    if not cfg_dir.exists():
+        return None, None
+    folders = sorted([d for d in cfg_dir.iterdir() if d.is_dir() and d.name.endswith("配置词")])
+    if len(folders) >= 2:
+        latest = folders[-1].name.replace("配置词", "")
+        prev = folders[-2].name.replace("配置词", "")
+        return latest, prev
+    if len(folders) == 1:
+        return folders[0].name.replace("配置词", ""), None
+    return None, None
+
+
 def find_natural_word_periods(base_dir: Path) -> tuple:
     """扫描自然搜索词文件夹找到最新和次新的周期"""
     nat_dir = base_dir / "自然搜索词部分"
@@ -69,6 +84,7 @@ def build_default_paths() -> dict:
     base_dir = next((p for p in DEFAULT_BASE_DIR_CANDIDATES if p.exists()), DEFAULT_BASE_DIR_CANDIDATES[-1])
     latest_period, prev_period = find_latest_periods(base_dir)
     hot_latest, hot_prev = find_hotword_periods(base_dir)
+    home_cfg_latest, home_cfg_prev = find_homepage_config_periods(base_dir)
     nat_latest, nat_prev = find_natural_word_periods(base_dir)
     
     # 小程序大盘：自动从文件夹中选取最新的 Excel 文件
@@ -93,6 +109,15 @@ def build_default_paths() -> dict:
         "hot_men_pre": str(base_dir / "热词部分" / f"{hot_prev}热词" / "男士.xlsx") if hot_prev else "",
         "hot_kids_pre": str(base_dir / "热词部分" / f"{hot_prev}热词" / "儿童.xlsx") if hot_prev else "",
         "hot_home_pre": str(base_dir / "热词部分" / f"{hot_prev}热词" / "家居.xlsx") if hot_prev else "",
+        # 首页配置词（独立周期；缺失时不影响整站启动）
+        "home_cfg_women_cur": str(base_dir / "首页配置词部分" / f"{home_cfg_latest}配置词" / "女士配置.xlsx") if home_cfg_latest else "",
+        "home_cfg_men_cur": str(base_dir / "首页配置词部分" / f"{home_cfg_latest}配置词" / "男士配置.xlsx") if home_cfg_latest else "",
+        "home_cfg_kids_cur": str(base_dir / "首页配置词部分" / f"{home_cfg_latest}配置词" / "儿童配置.xlsx") if home_cfg_latest else "",
+        "home_cfg_home_cur": str(base_dir / "首页配置词部分" / f"{home_cfg_latest}配置词" / "家居配置.xlsx") if home_cfg_latest else "",
+        "home_cfg_women_pre": str(base_dir / "首页配置词部分" / f"{home_cfg_prev}配置词" / "女士配置.xlsx") if home_cfg_prev else "",
+        "home_cfg_men_pre": str(base_dir / "首页配置词部分" / f"{home_cfg_prev}配置词" / "男士配置.xlsx") if home_cfg_prev else "",
+        "home_cfg_kids_pre": str(base_dir / "首页配置词部分" / f"{home_cfg_prev}配置词" / "儿童配置.xlsx") if home_cfg_prev else "",
+        "home_cfg_home_pre": str(base_dir / "首页配置词部分" / f"{home_cfg_prev}配置词" / "家居配置.xlsx") if home_cfg_prev else "",
         # 自然词（使用自然词文件的周期）
         "natural_words_cur": str(base_dir / "自然搜索词部分" / f"{nat_latest}自然搜索词.xlsx") if nat_latest else "",
         "natural_words_pre": str(base_dir / "自然搜索词部分" / f"{nat_prev}自然搜索词.xlsx") if nat_prev else "",
@@ -442,8 +467,8 @@ def load_data(paths: dict):
     ]
     hot_frames = []
     for category, fp_cur, fp_pre, kw_col in hot_cfg:
-        # 当前周热词
-        if fp_cur in paths and Path(paths[fp_cur]).exists():
+        # 当前周热词（路径须非空：Path(\"\") 在部分环境下会解析为 cwd 导致误读）
+        if fp_cur in paths and paths[fp_cur] and Path(paths[fp_cur]).exists():
             df_cur = pd.read_excel(paths[fp_cur], header=2).copy()
             if kw_col in df_cur.columns:
                 df_cur = df_cur.dropna(subset=[kw_col]).copy()
@@ -460,7 +485,7 @@ def load_data(paths: dict):
                 
                 # 加载上周热词
                 df_pre = None
-                if fp_pre in paths and Path(paths[fp_pre]).exists():
+                if fp_pre in paths and paths[fp_pre] and Path(paths[fp_pre]).exists():
                     df_pre = pd.read_excel(paths[fp_pre], header=2).copy()
                     if kw_col in df_pre.columns:
                         df_pre = df_pre.dropna(subset=[kw_col]).copy()
@@ -490,6 +515,67 @@ def load_data(paths: dict):
                 hot_frames.append(df_cur)
     
     hotwords = pd.concat(hot_frames, ignore_index=True) if hot_frames else pd.DataFrame()
+
+    home_cfg_keys = [
+        ("女士", "home_cfg_women_cur", "home_cfg_women_pre"),
+        ("男士", "home_cfg_men_cur", "home_cfg_men_pre"),
+        ("儿童", "home_cfg_kids_cur", "home_cfg_kids_pre"),
+        ("家居", "home_cfg_home_cur", "home_cfg_home_pre"),
+    ]
+    home_frames = []
+    for category, fp_cur, fp_pre in home_cfg_keys:
+        if fp_cur in paths and paths[fp_cur] and Path(paths[fp_cur]).exists():
+            df_cur = pd.read_excel(paths[fp_cur], header=2).copy()
+            kw_col = find_col(
+                df_cur,
+                ["自然搜索词", "关键词", f"{category}配置词分类", f"{category}热词分类", "配置词"],
+            )
+            if not kw_col:
+                continue
+            df_cur = df_cur.dropna(subset=[kw_col]).copy()
+            df_cur = df_cur.rename(columns={kw_col: "关键词", "购买UV": "购买人数"})
+            days_col = find_col(df_cur, ["上架天数", "上架天数(天)"])
+            if days_col and days_col != "上架天数":
+                df_cur = df_cur.rename(columns={days_col: "上架天数"})
+            if "上架天数" in df_cur.columns:
+                df_cur["上架天数"] = pd.to_numeric(df_cur["上架天数"], errors="coerce")
+            df_cur["品类"] = category
+            df_cur = to_num(df_cur, ["搜索PV", "搜索UV", "点击UV", "加购UV", "购买人数"])
+            df_cur["购买总金额"] = np.nan
+            df_cur = uv_rates(df_cur)
+
+            df_pre = None
+            if fp_pre in paths and paths[fp_pre] and Path(paths[fp_pre]).exists():
+                df_pre = pd.read_excel(paths[fp_pre], header=2).copy()
+                kw_pre = find_col(
+                    df_pre,
+                    ["自然搜索词", "关键词", f"{category}配置词分类", f"{category}热词分类", "配置词"],
+                )
+                if kw_pre:
+                    df_pre = df_pre.dropna(subset=[kw_pre]).copy()
+                    df_pre = df_pre.rename(columns={kw_pre: "关键词", "购买UV": "购买人数"})
+                    df_pre = to_num(df_pre, ["搜索PV", "搜索UV", "点击UV", "加购UV", "购买人数"])
+                    df_pre["购买总金额"] = np.nan
+                    df_pre = uv_rates(df_pre)
+
+            if df_pre is not None and not df_pre.empty:
+                merged = df_cur.merge(
+                    df_pre[["关键词", "搜索PV", "搜索UV", "点击UV", "加购UV", "购买人数", "CTR", "ATC", "CVR"]],
+                    on="关键词",
+                    how="left",
+                    suffixes=("_cur", "_pre"),
+                )
+                for col in ["搜索PV", "搜索UV", "点击UV", "加购UV", "购买人数", "CTR", "ATC", "CVR"]:
+                    merged[f"{col}_change"] = (merged[f"{col}_cur"] - merged[f"{col}_pre"]) / merged[f"{col}_pre"].replace(0, np.nan)
+                df_cur = merged
+            else:
+                for col in ["搜索PV", "搜索UV", "点击UV", "加购UV", "购买人数", "CTR", "ATC", "CVR"]:
+                    df_cur[f"{col}_cur"] = df_cur[col]
+                    df_cur[f"{col}_change"] = np.nan
+
+            home_frames.append(df_cur)
+
+    home_config_words = pd.concat(home_frames, ignore_index=True) if home_frames else pd.DataFrame()
 
     natural_words = pd.DataFrame()
     npath_cur = Path(paths.get("natural_words_cur", ""))
@@ -572,7 +658,7 @@ def load_data(paths: dict):
                 natural_words_list.append(cat_data)
             natural_words = pd.concat(natural_words_list, ignore_index=True) if natural_words_list else df_cur
 
-    return mini, zara_daily_cur, zara_daily_pre, zara_by_type_cur, zara_by_type_pre, hotwords, natural_words
+    return mini, zara_daily_cur, zara_daily_pre, zara_by_type_cur, zara_by_type_pre, hotwords, natural_words, home_config_words
 
 
 def weekly_from_daily(zara_daily_cur: pd.DataFrame, zara_daily_pre: pd.DataFrame = None):
@@ -1130,7 +1216,7 @@ def run_formula_checks(wk, contrib, by_type, zara_daily_cur, zara_by_type_cur):
     return results
 
 
-def run_data_quality_checks(mini, zara_daily_cur, zara_daily_pre, zara_by_type_cur, zara_by_type_pre, hotwords, natural_words):
+def run_data_quality_checks(mini, zara_daily_cur, zara_daily_pre, zara_by_type_cur, zara_by_type_pre, hotwords, natural_words, home_config_words):
     """数据质量：缺失、异常值、日期等。返回 [(check_name, passed, message), ...]"""
     results = []
 
@@ -1176,6 +1262,17 @@ def run_data_quality_checks(mini, zara_daily_cur, zara_daily_pre, zara_by_type_c
             results.append(("热词-搜索PV无负值", not neg_pv, "存在负值" if neg_pv else ""))
     else:
         results.append(("热词-有数据", True, "无热词数据"))
+
+    # home_config_words
+    if home_config_words is not None and not home_config_words.empty:
+        has_kw_h = "关键词" in home_config_words.columns
+        results.append(("首页配置词-关键词列", has_kw_h, ""))
+        pv_h = "搜索PV_cur" if "搜索PV_cur" in home_config_words.columns else "搜索PV"
+        if pv_h in home_config_words.columns and home_config_words[pv_h].notna().any():
+            neg_pv_h = (home_config_words[pv_h] < 0).any()
+            results.append(("首页配置词-搜索PV无负值", not neg_pv_h, "存在负值" if neg_pv_h else ""))
+    else:
+        results.append(("首页配置词-有数据", True, "无首页配置词数据"))
 
     # natural_words
     if natural_words is not None and not natural_words.empty:
@@ -1343,7 +1440,7 @@ def render():
         st.error("必需文件路径无效，请检查左侧。")
         st.stop()
 
-    mini, zara_daily_cur, zara_daily_pre, zara_by_type_cur, zara_by_type_pre, hotwords, natural_words = load_data(paths)
+    mini, zara_daily_cur, zara_daily_pre, zara_by_type_cur, zara_by_type_pre, hotwords, natural_words, home_config_words = load_data(paths)
     wk = weekly_from_daily(zara_daily_cur, zara_daily_pre)
     contrib = contribution_summary(wk, mini)
 
@@ -1475,7 +1572,7 @@ def render():
         hide_index=True,
     )
 
-    st.subheader("4) 热词与自然词分析")
+    st.subheader("4) 搜索词分析")
     
     for cate in CATEGORIES:
         st.markdown(f"### {cate}")
@@ -1522,6 +1619,51 @@ def render():
                 styled_df = apply_styler_change(table_data.style, styled_cols)
                 st.dataframe(
                     styled_df,
+                    use_container_width=True,
+                    height=400,
+                    hide_index=True,
+                )
+
+        st.markdown(f"**{cate} - 首页配置词分析**")
+        fig_home, data_home = category_scatter(home_config_words, cate, f"{cate} 首页配置词：CTR vs CVR（气泡=搜索PV）")
+        if fig_home is None:
+            st.info("该品类暂无首页配置词数据。")
+        else:
+            st.plotly_chart(fig_home, use_container_width=True)
+            good_h, bad_h, perf_basis_h = split_keyword_perf_groups(data_home)
+            if perf_basis_h != "无环比":
+                col_gh, col_bh = st.columns(2)
+                with col_gh:
+                    st.markdown(f"表现上升（{perf_basis_h} ≥ 0）")
+                    if good_h.empty:
+                        st.caption("暂无符合条件的词。")
+                    else:
+                        table_g_h, styled_cols_g_h = display_keyword_table(good_h)
+                        styled_df_g_h = apply_styler_change(table_g_h.style, styled_cols_g_h)
+                        st.dataframe(
+                            styled_df_g_h,
+                            use_container_width=True,
+                            height=380,
+                            hide_index=True,
+                        )
+                with col_bh:
+                    st.markdown(f"表现下降（{perf_basis_h} < 0）")
+                    if bad_h.empty:
+                        st.caption("暂无符合条件的词。")
+                    else:
+                        table_b_h, styled_cols_b_h = display_keyword_table(bad_h)
+                        styled_df_b_h = apply_styler_change(table_b_h.style, styled_cols_b_h)
+                        st.dataframe(
+                            styled_df_b_h,
+                            use_container_width=True,
+                            height=380,
+                            hide_index=True,
+                        )
+            else:
+                table_h, styled_cols_h = display_keyword_table(data_home)
+                styled_df_h = apply_styler_change(table_h.style, styled_cols_h)
+                st.dataframe(
+                    styled_df_h,
                     use_container_width=True,
                     height=400,
                     hide_index=True,
@@ -1613,7 +1755,7 @@ def render():
     st.subheader("5) 数据校验")
     disp_checks = run_display_consistency_checks(wk, contrib, by_type, zara_daily_cur, zara_daily_pre, mini, zara_by_type_cur, zara_by_type_pre)
     formula_checks = run_formula_checks(wk, contrib, by_type, zara_daily_cur, zara_by_type_cur)
-    quality_checks = run_data_quality_checks(mini, zara_daily_cur, zara_daily_pre, zara_by_type_cur, zara_by_type_pre, hotwords, natural_words)
+    quality_checks = run_data_quality_checks(mini, zara_daily_cur, zara_daily_pre, zara_by_type_cur, zara_by_type_pre, hotwords, natural_words, home_config_words)
     baseline_passed, baseline_diffs = compare_against_baseline(wk, contrib, by_type, str(BASELINE_PATH))
 
     def render_check_list(items, title):
