@@ -420,9 +420,33 @@ def find_col(df: pd.DataFrame, cands):
     return None
 
 
+def read_excel_checked(path: str, label: str, header=0):
+    """读取 Excel；对 .xlsx 校验 ZIP 文件头（PK），避免把接口错误 JSON 等误存为 .xlsx 导致 pandas 报「无法判断格式」。"""
+    p = Path(path)
+    if not path or not str(path).strip():
+        raise FileNotFoundError(f"{label}：路径为空，请检查侧栏「mini」或数据源「小程序大盘部分」下是否有有效 .xlsx。")
+    if not p.is_file():
+        raise FileNotFoundError(f"{label}：文件不存在：{p}")
+    suf = p.suffix.lower()
+    if suf not in (".xlsx", ".xls"):
+        raise ValueError(f"{label}：需要 .xlsx 或 .xls，当前为 {suf!r}：{p}")
+    with p.open("rb") as f:
+        sig = f.read(4)
+    if suf == ".xlsx":
+        if not sig.startswith(b"PK"):
+            raise ValueError(
+                f"{label}：内容不是有效 xlsx（应以 PK 开头）。常见原因：导出失败，文件实为 JSON/HTML 错误页。"
+                f"请重新下载或从 Excel 另存为真实表格。\n路径：{p}"
+            )
+        return pd.read_excel(p, engine="openpyxl", header=header)
+    if not sig.startswith(b"\xd0\xcf\x11\xe0"):
+        raise ValueError(f"{label}：内容不是有效 .xls：{p}")
+    return pd.read_excel(p, engine="xlrd", header=header)
+
+
 @st.cache_data(show_spinner=False)
 def load_data(paths: dict):
-    mini = pd.read_excel(paths["mini"]).copy()
+    mini = read_excel_checked(paths["mini"], "小程序大盘").copy()
     mini["date"] = pd.to_datetime(mini["日期"].astype(str), errors="coerce")
     mini = to_num(mini, ["成交金额", "成交人数", "UV", "UV价值"]).dropna(subset=["date"]).sort_values("date")
 
