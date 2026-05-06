@@ -51,18 +51,31 @@ def find_hotword_periods(base_dir: Path) -> tuple:
 
 
 def find_homepage_config_periods(base_dir: Path) -> tuple:
-    """扫描首页配置词文件夹找到最新和次新的周期（目录名以「配置词」结尾）。"""
+    """扫描首页配置词部分，得到最新、次新周期字符串（去掉后缀「配置词」）。
+
+    优先识别新格式：根目录下 ``{周期}配置词.xlsx``；若无则回退旧格式：子目录 ``{周期}配置词/``。
+    同一周期若同时存在单文件与目录，以单文件为准。
+    """
     cfg_dir = base_dir / "首页配置词部分"
     if not cfg_dir.exists():
         return None, None
-    folders = sorted([d for d in cfg_dir.iterdir() if d.is_dir() and d.name.endswith("配置词")])
-    if len(folders) >= 2:
-        latest = folders[-1].name.replace("配置词", "")
-        prev = folders[-2].name.replace("配置词", "")
-        return latest, prev
-    if len(folders) == 1:
-        return folders[0].name.replace("配置词", ""), None
-    return None, None
+    by_period: dict[str, str] = {}
+    for f in cfg_dir.glob("*.xlsx"):
+        if f.stem.endswith("配置词"):
+            period = f.stem.replace("配置词", "")
+            by_period[period] = f.name
+    for d in cfg_dir.iterdir():
+        if d.is_dir() and d.name.endswith("配置词"):
+            period = d.name.replace("配置词", "")
+            if period not in by_period:
+                by_period[period] = d.name + "/"
+    if not by_period:
+        return None, None
+    ordered = sorted(by_period.items(), key=lambda kv: kv[1])
+    periods = [p for p, _ in ordered]
+    if len(periods) >= 2:
+        return periods[-1], periods[-2]
+    return periods[0], None
 
 
 def find_natural_word_periods(base_dir: Path) -> tuple:
@@ -80,6 +93,27 @@ def find_natural_word_periods(base_dir: Path) -> tuple:
     return None, None
 
 
+def is_valid_ooxml_xlsx(p: Path) -> bool:
+    """``.xlsx`` 实为 ZIP（OOXML），应以 PK 开头；用于排除接口错误写入的 JSON/HTML 伪装文件。"""
+    if not p.is_file() or p.suffix.lower() != ".xlsx":
+        return False
+    try:
+        with p.open("rb") as f:
+            return f.read(2) == b"PK"
+    except OSError:
+        return False
+
+
+def pick_latest_valid_mini_xlsx(mini_dir: Path) -> str:
+    """在同一目录（小程序大盘）中自新向旧选取第一个可用的真实 ``.xlsx``。"""
+    if not mini_dir.is_dir():
+        return ""
+    for p in reversed(sorted(mini_dir.glob("*.xlsx"))):
+        if is_valid_ooxml_xlsx(p):
+            return str(p)
+    return ""
+
+
 def build_default_paths() -> dict:
     base_dir = next((p for p in DEFAULT_BASE_DIR_CANDIDATES if p.exists()), DEFAULT_BASE_DIR_CANDIDATES[-1])
     latest_period, prev_period = find_latest_periods(base_dir)
@@ -87,10 +121,14 @@ def build_default_paths() -> dict:
     home_cfg_latest, home_cfg_prev = find_homepage_config_periods(base_dir)
     nat_latest, nat_prev = find_natural_word_periods(base_dir)
     
-    # 小程序大盘：自动从文件夹中选取最新的 Excel 文件
+    # 小程序大盘：优先同目录最新且真实可用的 .xlsx；若仅为伪装文件则仍填入最新文件名便于检测并在 load_data 中提示
     mini_dir = base_dir / "小程序大盘部分"
-    mini_files = sorted(mini_dir.glob("*.xlsx")) if mini_dir.exists() else []
-    mini_path = str(mini_files[-1]) if mini_files else ""
+    mini_path = ""
+    if mini_dir.exists():
+        mini_path = pick_latest_valid_mini_xlsx(mini_dir)
+        if not mini_path:
+            all_xlsx = sorted(mini_dir.glob("*.xlsx"))
+            mini_path = str(all_xlsx[-1]) if all_xlsx else ""
 
     paths = {
         "mini": mini_path,
@@ -109,15 +147,21 @@ def build_default_paths() -> dict:
         "hot_men_pre": str(base_dir / "热词部分" / f"{hot_prev}热词" / "男士.xlsx") if hot_prev else "",
         "hot_kids_pre": str(base_dir / "热词部分" / f"{hot_prev}热词" / "儿童.xlsx") if hot_prev else "",
         "hot_home_pre": str(base_dir / "热词部分" / f"{hot_prev}热词" / "家居.xlsx") if hot_prev else "",
-        # 首页配置词（独立周期；缺失时不影响整站启动）
-        "home_cfg_women_cur": str(base_dir / "首页配置词部分" / f"{home_cfg_latest}配置词" / "女士配置.xlsx") if home_cfg_latest else "",
-        "home_cfg_men_cur": str(base_dir / "首页配置词部分" / f"{home_cfg_latest}配置词" / "男士配置.xlsx") if home_cfg_latest else "",
-        "home_cfg_kids_cur": str(base_dir / "首页配置词部分" / f"{home_cfg_latest}配置词" / "儿童配置.xlsx") if home_cfg_latest else "",
-        "home_cfg_home_cur": str(base_dir / "首页配置词部分" / f"{home_cfg_latest}配置词" / "家居配置.xlsx") if home_cfg_latest else "",
-        "home_cfg_women_pre": str(base_dir / "首页配置词部分" / f"{home_cfg_prev}配置词" / "女士配置.xlsx") if home_cfg_prev else "",
-        "home_cfg_men_pre": str(base_dir / "首页配置词部分" / f"{home_cfg_prev}配置词" / "男士配置.xlsx") if home_cfg_prev else "",
-        "home_cfg_kids_pre": str(base_dir / "首页配置词部分" / f"{home_cfg_prev}配置词" / "儿童配置.xlsx") if home_cfg_prev else "",
-        "home_cfg_home_pre": str(base_dir / "首页配置词部分" / f"{home_cfg_prev}配置词" / "家居配置.xlsx") if home_cfg_prev else "",
+        # 首页配置词：新格式为单文件 ``{周期}配置词.xlsx``；旧格式为 ``{周期}配置词/女士配置.xlsx`` 等
+        "home_cfg_cur": str(base_dir / "首页配置词部分" / f"{home_cfg_latest}配置词.xlsx")
+        if home_cfg_latest and (base_dir / "首页配置词部分" / f"{home_cfg_latest}配置词.xlsx").is_file()
+        else "",
+        "home_cfg_pre": str(base_dir / "首页配置词部分" / f"{home_cfg_prev}配置词.xlsx")
+        if home_cfg_prev and (base_dir / "首页配置词部分" / f"{home_cfg_prev}配置词.xlsx").is_file()
+        else "",
+        "home_cfg_women_cur": "",
+        "home_cfg_men_cur": "",
+        "home_cfg_kids_cur": "",
+        "home_cfg_home_cur": "",
+        "home_cfg_women_pre": "",
+        "home_cfg_men_pre": "",
+        "home_cfg_kids_pre": "",
+        "home_cfg_home_pre": "",
         # 自然词（使用自然词文件的周期）
         "natural_words_cur": str(base_dir / "自然搜索词部分" / f"{nat_latest}自然搜索词.xlsx") if nat_latest else "",
         "natural_words_pre": str(base_dir / "自然搜索词部分" / f"{nat_prev}自然搜索词.xlsx") if nat_prev else "",
@@ -142,7 +186,23 @@ def build_default_paths() -> dict:
             alt_path = fpath.parent / f"{category_map[key]}品类热词.xlsx"
             if alt_path.exists():
                 paths[key] = str(alt_path)
-    
+
+    cfg_root = base_dir / "首页配置词部分"
+    if home_cfg_latest and not paths["home_cfg_cur"]:
+        leg_cur = cfg_root / f"{home_cfg_latest}配置词"
+        if leg_cur.is_dir():
+            paths["home_cfg_women_cur"] = str(leg_cur / "女士配置.xlsx")
+            paths["home_cfg_men_cur"] = str(leg_cur / "男士配置.xlsx")
+            paths["home_cfg_kids_cur"] = str(leg_cur / "儿童配置.xlsx")
+            paths["home_cfg_home_cur"] = str(leg_cur / "家居配置.xlsx")
+    if home_cfg_prev and not paths["home_cfg_pre"]:
+        leg_pre = cfg_root / f"{home_cfg_prev}配置词"
+        if leg_pre.is_dir():
+            paths["home_cfg_women_pre"] = str(leg_pre / "女士配置.xlsx")
+            paths["home_cfg_men_pre"] = str(leg_pre / "男士配置.xlsx")
+            paths["home_cfg_kids_pre"] = str(leg_pre / "儿童配置.xlsx")
+            paths["home_cfg_home_pre"] = str(leg_pre / "家居配置.xlsx")
+
     return paths
 
 
@@ -444,9 +504,65 @@ def read_excel_checked(path: str, label: str, header=0):
     return pd.read_excel(p, engine="xlrd", header=header)
 
 
+def _prepare_home_config_sheet(df: pd.DataFrame) -> pd.DataFrame:
+    """将首页配置词条目表规范为关键词、品类、指标与比率（单行文件或多行合一表）。"""
+    kw_col = find_col(
+        df,
+        [
+            "自然搜索词",
+            "关键词",
+            "配置词",
+            "女士热词分类",
+            "男士热词分类",
+            "儿童热词分类",
+            "家居热词分类",
+            "女士配置词分类",
+            "男士配置词分类",
+            "儿童配置词分类",
+            "家居配置词分类",
+        ],
+    )
+    if not kw_col:
+        return pd.DataFrame()
+    out = df.dropna(subset=[kw_col]).copy()
+    out = out.rename(columns={kw_col: "关键词", "购买UV": "购买人数"})
+    cat_col = find_col(out, ["品类", "类目", "搜索品类", "分部"])
+    if cat_col:
+        out["品类"] = out[cat_col].astype(str).str.strip()
+    else:
+        s = out["关键词"].astype(str).str.strip()
+        out["品类"] = s.str.extract(r"(女士|男士|儿童|家居)$", expand=False)
+        out["品类"] = out["品类"].fillna(s.str[-2:])
+    out = out[out["品类"].isin(CATEGORIES)].copy()
+    if out.empty:
+        return out
+    days_col = find_col(out, ["上架天数", "上架天数(天)"])
+    if days_col and days_col != "上架天数":
+        out = out.rename(columns={days_col: "上架天数"})
+    if "上架天数" in out.columns:
+        out["上架天数"] = pd.to_numeric(out["上架天数"], errors="coerce")
+    out = to_num(out, ["搜索PV", "搜索UV", "点击UV", "加购UV", "购买人数"])
+    out["购买总金额"] = np.nan
+    out = uv_rates(out)
+    return out
+
+
 @st.cache_data(show_spinner=False)
 def load_data(paths: dict):
-    mini = read_excel_checked(paths["mini"], "小程序大盘").copy()
+    mini_path = (paths.get("mini") or "").strip()
+    pmini = Path(mini_path)
+    if mini_path and pmini.is_file() and pmini.suffix.lower() == ".xlsx" and not is_valid_ooxml_xlsx(pmini):
+        alt = pick_latest_valid_mini_xlsx(pmini.parent)
+        if alt:
+            mini_path = alt
+        else:
+            raise ValueError(
+                "小程序大盘：当前文件不是有效 xlsx（非 ZIP / 常为接口错误正文），且同目录无其他可用 .xlsx。"
+                "请重新导出或替换为 Excel 真实另存。\n路径："
+                f"{pmini}"
+            )
+
+    mini = read_excel_checked(mini_path, "小程序大盘").copy()
     mini["date"] = pd.to_datetime(mini["日期"].astype(str), errors="coerce")
     mini = to_num(mini, ["成交金额", "成交人数", "UV", "UV价值"]).dropna(subset=["date"]).sort_values("date")
 
@@ -540,64 +656,100 @@ def load_data(paths: dict):
     
     hotwords = pd.concat(hot_frames, ignore_index=True) if hot_frames else pd.DataFrame()
 
-    home_cfg_keys = [
-        ("女士", "home_cfg_women_cur", "home_cfg_women_pre"),
-        ("男士", "home_cfg_men_cur", "home_cfg_men_pre"),
-        ("儿童", "home_cfg_kids_cur", "home_cfg_kids_pre"),
-        ("家居", "home_cfg_home_cur", "home_cfg_home_pre"),
-    ]
     home_frames = []
-    for category, fp_cur, fp_pre in home_cfg_keys:
-        if fp_cur in paths and paths[fp_cur] and Path(paths[fp_cur]).exists():
-            df_cur = pd.read_excel(paths[fp_cur], header=2).copy()
-            kw_col = find_col(
-                df_cur,
-                ["自然搜索词", "关键词", f"{category}配置词分类", f"{category}热词分类", "配置词"],
-            )
-            if not kw_col:
-                continue
-            df_cur = df_cur.dropna(subset=[kw_col]).copy()
-            df_cur = df_cur.rename(columns={kw_col: "关键词", "购买UV": "购买人数"})
-            days_col = find_col(df_cur, ["上架天数", "上架天数(天)"])
-            if days_col and days_col != "上架天数":
-                df_cur = df_cur.rename(columns={days_col: "上架天数"})
-            if "上架天数" in df_cur.columns:
-                df_cur["上架天数"] = pd.to_numeric(df_cur["上架天数"], errors="coerce")
-            df_cur["品类"] = category
-            df_cur = to_num(df_cur, ["搜索PV", "搜索UV", "点击UV", "加购UV", "购买人数"])
-            df_cur["购买总金额"] = np.nan
-            df_cur = uv_rates(df_cur)
+    hc_cur = paths.get("home_cfg_cur", "")
+    hc_pre = paths.get("home_cfg_pre", "")
 
+    if hc_cur and Path(hc_cur).exists():
+        df_cur = read_excel_checked(hc_cur, "首页配置词-本周", header=2).copy()
+        df_cur = _prepare_home_config_sheet(df_cur)
+        if not df_cur.empty:
             df_pre = None
-            if fp_pre in paths and paths[fp_pre] and Path(paths[fp_pre]).exists():
-                df_pre = pd.read_excel(paths[fp_pre], header=2).copy()
-                kw_pre = find_col(
-                    df_pre,
-                    ["自然搜索词", "关键词", f"{category}配置词分类", f"{category}热词分类", "配置词"],
-                )
-                if kw_pre:
-                    df_pre = df_pre.dropna(subset=[kw_pre]).copy()
-                    df_pre = df_pre.rename(columns={kw_pre: "关键词", "购买UV": "购买人数"})
-                    df_pre = to_num(df_pre, ["搜索PV", "搜索UV", "点击UV", "加购UV", "购买人数"])
-                    df_pre["购买总金额"] = np.nan
-                    df_pre = uv_rates(df_pre)
-
+            if hc_pre and Path(hc_pre).exists():
+                raw_pre = read_excel_checked(hc_pre, "首页配置词-上周", header=2).copy()
+                cand_pre = _prepare_home_config_sheet(raw_pre)
+                if not cand_pre.empty:
+                    df_pre = cand_pre
             if df_pre is not None and not df_pre.empty:
-                merged = df_cur.merge(
+                merged_all = df_cur.merge(
                     df_pre[["关键词", "搜索PV", "搜索UV", "点击UV", "加购UV", "购买人数", "CTR", "ATC", "CVR"]],
                     on="关键词",
                     how="left",
                     suffixes=("_cur", "_pre"),
                 )
                 for col in ["搜索PV", "搜索UV", "点击UV", "加购UV", "购买人数", "CTR", "ATC", "CVR"]:
-                    merged[f"{col}_change"] = (merged[f"{col}_cur"] - merged[f"{col}_pre"]) / merged[f"{col}_pre"].replace(0, np.nan)
-                df_cur = merged
+                    merged_all[f"{col}_change"] = (merged_all[f"{col}_cur"] - merged_all[f"{col}_pre"]) / merged_all[
+                        f"{col}_pre"
+                    ].replace(0, np.nan)
             else:
+                merged_all = df_cur.copy()
                 for col in ["搜索PV", "搜索UV", "点击UV", "加购UV", "购买人数", "CTR", "ATC", "CVR"]:
-                    df_cur[f"{col}_cur"] = df_cur[col]
-                    df_cur[f"{col}_change"] = np.nan
+                    merged_all[f"{col}_cur"] = merged_all[col]
+                    merged_all[f"{col}_change"] = np.nan
+            for cat in CATEGORIES:
+                sub = merged_all[merged_all["品类"] == cat].copy()
+                if not sub.empty:
+                    home_frames.append(sub)
+    else:
+        home_cfg_keys = [
+            ("女士", "home_cfg_women_cur", "home_cfg_women_pre"),
+            ("男士", "home_cfg_men_cur", "home_cfg_men_pre"),
+            ("儿童", "home_cfg_kids_cur", "home_cfg_kids_pre"),
+            ("家居", "home_cfg_home_cur", "home_cfg_home_pre"),
+        ]
+        for category, fp_cur, fp_pre in home_cfg_keys:
+            if fp_cur in paths and paths[fp_cur] and Path(paths[fp_cur]).exists():
+                df_cur = read_excel_checked(paths[fp_cur], f"首页配置词-{category}-本周", header=2).copy()
+                kw_col = find_col(
+                    df_cur,
+                    ["自然搜索词", "关键词", f"{category}配置词分类", f"{category}热词分类", "配置词"],
+                )
+                if not kw_col:
+                    continue
+                df_cur = df_cur.dropna(subset=[kw_col]).copy()
+                df_cur = df_cur.rename(columns={kw_col: "关键词", "购买UV": "购买人数"})
+                days_col = find_col(df_cur, ["上架天数", "上架天数(天)"])
+                if days_col and days_col != "上架天数":
+                    df_cur = df_cur.rename(columns={days_col: "上架天数"})
+                if "上架天数" in df_cur.columns:
+                    df_cur["上架天数"] = pd.to_numeric(df_cur["上架天数"], errors="coerce")
+                df_cur["品类"] = category
+                df_cur = to_num(df_cur, ["搜索PV", "搜索UV", "点击UV", "加购UV", "购买人数"])
+                df_cur["购买总金额"] = np.nan
+                df_cur = uv_rates(df_cur)
 
-            home_frames.append(df_cur)
+                df_pre = None
+                if fp_pre in paths and paths[fp_pre] and Path(paths[fp_pre]).exists():
+                    raw_pre = read_excel_checked(paths[fp_pre], f"首页配置词-{category}-上周", header=2).copy()
+                    kw_pre = find_col(
+                        raw_pre,
+                        ["自然搜索词", "关键词", f"{category}配置词分类", f"{category}热词分类", "配置词"],
+                    )
+                    if kw_pre:
+                        df_pre = raw_pre.dropna(subset=[kw_pre]).copy()
+                        df_pre = df_pre.rename(columns={kw_pre: "关键词", "购买UV": "购买人数"})
+                        df_pre = to_num(df_pre, ["搜索PV", "搜索UV", "点击UV", "加购UV", "购买人数"])
+                        df_pre["购买总金额"] = np.nan
+                        df_pre = uv_rates(df_pre)
+
+                if df_pre is not None and not df_pre.empty:
+                    merged = df_cur.merge(
+                        df_pre[["关键词", "搜索PV", "搜索UV", "点击UV", "加购UV", "购买人数", "CTR", "ATC", "CVR"]],
+                        on="关键词",
+                        how="left",
+                        suffixes=("_cur", "_pre"),
+                    )
+                    for col in ["搜索PV", "搜索UV", "点击UV", "加购UV", "购买人数", "CTR", "ATC", "CVR"]:
+                        merged[f"{col}_change"] = (merged[f"{col}_cur"] - merged[f"{col}_pre"]) / merged[
+                            f"{col}_pre"
+                        ].replace(0, np.nan)
+                    df_cur = merged
+                else:
+                    for col in ["搜索PV", "搜索UV", "点击UV", "加购UV", "购买人数", "CTR", "ATC", "CVR"]:
+                        df_cur[f"{col}_cur"] = df_cur[col]
+                        df_cur[f"{col}_change"] = np.nan
+
+                home_frames.append(df_cur)
 
     home_config_words = pd.concat(home_frames, ignore_index=True) if home_frames else pd.DataFrame()
 
