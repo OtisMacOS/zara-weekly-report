@@ -8,6 +8,7 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
+import streamlit.components.v1 as components
 from matplotlib import pyplot as plt
 from matplotlib.backends.backend_pdf import PdfPages
 from plotly.subplots import make_subplots
@@ -219,6 +220,8 @@ SEARCH_PART_CATEGORIES = CATEGORIES + [SHOES_BAGS_CATEGORY]
 NATURAL_TOPN_BY_CATE = {"女士": 100, "男士": 30, "儿童": 30, "家居": 30, SHOES_BAGS_CATEGORY: 30}
 NATURAL_WOMEN_PAGE_SIZE = 20
 _SHOES_BAGS_KW_PATTERN = re.compile(r"鞋|包|靴|袋")
+# 禁用滚轮缩放，避免浏览页面时误触图表
+PLOTLY_CHART_CONFIG = {"scrollZoom": False}
 
 
 def _keyword_core_text(keyword: str) -> str:
@@ -1232,7 +1235,7 @@ def render_interactive_category_scatter(scatter_factory, chart_key: str):
         key=f"plot_{chart_key}",
         on_select="rerun",
         selection_mode=("points", "box", "lasso"),
-        config={"scrollZoom": True},
+        config=PLOTLY_CHART_CONFIG,
     )
     if apply_scatter_selection_toggle(event, chart_key):
         st.rerun()
@@ -1783,22 +1786,83 @@ def build_pdf_bytes(wk: dict, contrib: dict, by_type: pd.DataFrame):
     return buf.getvalue()
 
 
+REPORT_TOC_SECTIONS = [
+    ("sec-1", "1) 搜索引擎整体周环比"),
+    ("sec-2", "2) 搜索对大盘贡献"),
+    ("sec-3", "3) 搜索类型周环比"),
+    ("sec-4", "4) 搜索词分析"),
+    ("sec-5", "5) 数据校验"),
+    ("sec-6", "6) 导出 PDF"),
+]
+
+
+def section_anchor(anchor_id: str) -> None:
+    st.markdown(f'<div id="{anchor_id}"></div>', unsafe_allow_html=True)
+
+
+def scroll_to_anchor(anchor_id: str) -> None:
+    """滚动到主内容区锚点，不使用 URL hash，避免侧栏异常半收拢。"""
+    safe_id = json.dumps(anchor_id)
+    components.html(
+        f"""
+        <script>
+            (function() {{
+                const targetId = {safe_id};
+                function tryScroll() {{
+                    const doc = window.parent.document;
+                    const el = doc.getElementById(targetId);
+                    if (!el) return false;
+                    el.scrollIntoView({{behavior: "smooth", block: "start"}});
+                    return true;
+                }}
+                if (!tryScroll()) {{
+                    setTimeout(tryScroll, 400);
+                }}
+            }})();
+        </script>
+        """,
+        height=0,
+    )
+
+
+def _set_toc_scroll_target(anchor_id: str) -> None:
+    st.session_state["toc_scroll_target"] = anchor_id
+
+
+def render_sidebar_toc() -> None:
+    with st.sidebar:
+        st.subheader("目录")
+        for anchor, label in REPORT_TOC_SECTIONS:
+            st.button(
+                label,
+                key=f"toc_{anchor}",
+                use_container_width=True,
+                on_click=_set_toc_scroll_target,
+                args=(anchor,),
+            )
+        st.markdown("---")
+        st.markdown("**4) 品类**")
+        for cate in SEARCH_PART_CATEGORIES:
+            anchor = f"sec-4-{cate}"
+            st.button(
+                cate,
+                key=f"toc_{anchor}",
+                use_container_width=True,
+                on_click=_set_toc_scroll_target,
+                args=(anchor,),
+            )
+
+
 def render():
     st.set_page_config(page_title="搜索引擎质量周报", layout="wide")
     st.title("搜索引擎质量周报（自动化版）")
 
-    with st.sidebar:
-        st.subheader("数据文件路径")
-        # 过滤掉元数据字段，只显示文件路径
-        file_keys = [k for k in DEFAULT_PATHS.keys() if not k.startswith("latest_") and not k.startswith("prev_")]
-        display_paths = {k: st.text_input(k, value=DEFAULT_PATHS.get(k, "")) for k in file_keys}
-        # 保留元数据字段
-        paths = display_paths.copy()
-        paths.update({k: v for k, v in DEFAULT_PATHS.items() if k.startswith("latest_") or k.startswith("prev_")})
+    render_sidebar_toc()
+    paths = build_default_paths()
 
     required = ["mini", "zara_daily_cur", "zara_by_type_cur", "hot_women_cur", "hot_men_cur", "hot_kids_cur", "hot_home_cur"]
     if not all(Path(paths[k]).exists() for k in required):
-        st.error("必需文件路径无效，请检查左侧。")
+        st.error("必需数据文件缺失，请检查 zara周报数据源 目录下是否有最新导出文件。")
         st.stop()
 
     mini, zara_daily_cur, zara_daily_pre, zara_by_type_cur, zara_by_type_pre, hotwords, natural_words, home_config_words = load_data(paths)
@@ -1809,6 +1873,7 @@ def render():
 
     st.caption(f"本周：{wk['period']['cur']} | 上周：{wk['period']['pre']}")
 
+    section_anchor("sec-1")
     st.subheader("1) 搜索引擎整体周环比（仅 zara日度数据.xlsx）")
     kpi = ["搜索UV", "点击UV", "加购UV", "购买人数", "CTR", "ATC", "CVR"]
     cols = st.columns(len(kpi))
@@ -1827,8 +1892,9 @@ def render():
         fig_rate.add_trace(go.Scatter(x=wk["pre"]["date"], y=wk["pre"][metric], mode="lines+markers+text", name=f"{metric}-上周", line=dict(color=rate_colors[metric], dash="dash", width=2), text=[f"{v:.1%}" if pd.notna(v) else "-" for v in wk["pre"][metric]], textposition="bottom center"))
     fig_rate.update_layout(height=380, margin=dict(l=20, r=20, t=20, b=20))
     fig_rate.update_yaxes(tickformat=".0%")
-    st.plotly_chart(fig_rate, use_container_width=True)
+    st.plotly_chart(fig_rate, use_container_width=True, config=PLOTLY_CHART_CONFIG)
 
+    section_anchor("sec-2")
     st.subheader("2) 搜索对大盘贡献")
     s1, s2, s3 = st.columns(3)
     for i, name in enumerate(["金额占比", "人数占比", "UV_VALUE"]):
@@ -1846,15 +1912,16 @@ def render():
         fig_share.add_trace(go.Scatter(x=contrib["daily_cur"]["date"], y=contrib["daily_cur"][metric], mode="lines+markers+text", name=f"{metric}-本周", line=dict(color=color), text=[f"{v:.1%}" if pd.notna(v) else "-" for v in contrib["daily_cur"][metric]], textposition="top center"))
         fig_share.add_trace(go.Scatter(x=contrib["daily_pre"]["date"], y=contrib["daily_pre"][metric], mode="lines+markers+text", name=f"{metric}-上周", line=dict(color=color, dash="dash"), text=[f"{v:.1%}" if pd.notna(v) else "-" for v in contrib["daily_pre"][metric]], textposition="bottom center"))
     fig_share.update_layout(height=380, margin=dict(l=20, r=20, t=20, b=20), yaxis=dict(title="占比", tickformat=".0%"))
-    st.plotly_chart(fig_share, use_container_width=True)
+    st.plotly_chart(fig_share, use_container_width=True, config=PLOTLY_CHART_CONFIG)
 
     # 图2-2: UV_VALUE（本周实线，上周虚线）
     fig_uvv = go.Figure()
     fig_uvv.add_trace(go.Scatter(x=contrib["daily_cur"]["date"], y=contrib["daily_cur"]["UV_VALUE"], mode="lines+markers+text", name="UV_VALUE-本周", line=dict(color="#2ca02c"), text=[f"{v:.1f}" if pd.notna(v) else "-" for v in contrib["daily_cur"]["UV_VALUE"]], textposition="top center"))
     fig_uvv.add_trace(go.Scatter(x=contrib["daily_pre"]["date"], y=contrib["daily_pre"]["UV_VALUE"], mode="lines+markers+text", name="UV_VALUE-上周", line=dict(color="#2ca02c", dash="dash"), text=[f"{v:.1f}" if pd.notna(v) else "-" for v in contrib["daily_pre"]["UV_VALUE"]], textposition="bottom center"))
     fig_uvv.update_layout(height=320, margin=dict(l=20, r=20, t=20, b=20), yaxis=dict(title="UV_VALUE"))
-    st.plotly_chart(fig_uvv, use_container_width=True)
+    st.plotly_chart(fig_uvv, use_container_width=True, config=PLOTLY_CHART_CONFIG)
 
+    section_anchor("sec-3")
     st.subheader("3) 搜索类型周环比（全链路）")
     # 图3-0: 搜索量占比柱状图（柱高为搜索UV占比）
     fig_t0 = go.Figure()
@@ -1891,7 +1958,7 @@ def render():
         yaxis=dict(title="搜索UV占比", tickformat=".0%"),
         title="按搜索类型的搜索量占比",
     )
-    st.plotly_chart(fig_t0, use_container_width=True)
+    st.plotly_chart(fig_t0, use_container_width=True, config=PLOTLY_CHART_CONFIG)
 
     # 图3-1: 金额占比柱状图（柱高为占比，标签显示金额+占比）
     fig_t1 = go.Figure()
@@ -1906,7 +1973,7 @@ def render():
     fig_t1.add_trace(go.Bar(x=by_type["操作类型"], y=by_type["金额占比_本周"], name="本周", marker_color="#4c78a8", text=text_cur, textposition="outside"))
     fig_t1.add_trace(go.Bar(x=by_type["操作类型"], y=pre_share, name="上周", marker_color="#9ecae9", text=text_pre, textposition="outside"))
     fig_t1.update_layout(height=380, barmode="group", margin=dict(l=20, r=20, t=20, b=20), yaxis=dict(title="金额占比", tickformat=".0%"))
-    st.plotly_chart(fig_t1, use_container_width=True)
+    st.plotly_chart(fig_t1, use_container_width=True, config=PLOTLY_CHART_CONFIG)
 
     # 图3-2: 同指标一起（深色=本周，浅色=上周）
     metrics_cfg = [
@@ -1920,7 +1987,7 @@ def render():
         fig_t2.add_trace(go.Bar(x=by_type["操作类型"], y=by_type[f"{m}_上周"], name=f"{m}-上周", marker_color=c_pre, text=[f"{v:.1%}" if pd.notna(v) else "-" for v in by_type[f"{m}_上周"]], textposition="outside", showlegend=(idx == 1)), row=1, col=idx)
         fig_t2.update_yaxes(tickformat=".0%", row=1, col=idx)
     fig_t2.update_layout(height=430, barmode="group", margin=dict(l=20, r=20, t=50, b=20))
-    st.plotly_chart(fig_t2, use_container_width=True)
+    st.plotly_chart(fig_t2, use_container_width=True, config=PLOTLY_CHART_CONFIG)
 
     st.dataframe(
         by_type[["操作类型", "搜索UV_本周", "点击UV_本周", "加购UV_本周", "购买人数_本周", "CTR_本周", "ATC_本周", "CVR_本周", "金额占比_本周"]].style.format(
@@ -1933,9 +2000,11 @@ def render():
         hide_index=True,
     )
 
+    section_anchor("sec-4")
     st.subheader("4) 搜索词分析")
     
     for cate in SEARCH_PART_CATEGORIES:
+        section_anchor(f"sec-4-{cate}")
         st.markdown(f"### {cate}")
         if cate == SHOES_BAGS_CATEGORY:
             st.caption("由女士品类中筛出鞋、包、靴、袋等相关搜索词，单独作为鞋包类目展示。")
@@ -2136,6 +2205,7 @@ def render():
                     hide_index=True,
                 )
 
+    section_anchor("sec-5")
     st.subheader("5) 数据校验")
     disp_checks = run_display_consistency_checks(wk, contrib, by_type, zara_daily_cur, zara_daily_pre, mini, zara_by_type_cur, zara_by_type_pre)
     formula_checks = run_formula_checks(wk, contrib, by_type, zara_daily_cur, zara_by_type_cur)
@@ -2210,6 +2280,7 @@ def render():
             mime="text/markdown",
         )
 
+    section_anchor("sec-6")
     st.subheader("6) 导出 PDF")
     pdf_bytes = build_pdf_bytes(wk, contrib, by_type)
     st.download_button(
@@ -2218,6 +2289,10 @@ def render():
         file_name=f"search_quality_report_{wk['cur']['date'].max().date()}.pdf",
         mime="application/pdf",
     )
+
+    scroll_target = st.session_state.pop("toc_scroll_target", None)
+    if scroll_target:
+        scroll_to_anchor(scroll_target)
 
 
 if __name__ == "__main__":
