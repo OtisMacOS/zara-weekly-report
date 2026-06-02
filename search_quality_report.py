@@ -1,5 +1,6 @@
 import io
 import json
+import re
 from datetime import datetime
 from pathlib import Path
 
@@ -210,10 +211,40 @@ DEFAULT_PATHS = build_default_paths()
 
 TYPE_VALUE_COLS = ["搜索UV", "点击UV", "加购UV", "购买人数", "购买总金额"]
 CATEGORIES = ["女士", "男士", "儿童", "家居"]
+SHOES_BAGS_CATEGORY = "鞋包"
+# 第四部分搜索词分析展示顺序（鞋包由女士中筛出，固定放在最后）
+SEARCH_PART_CATEGORIES = CATEGORIES + [SHOES_BAGS_CATEGORY]
 
 # 自然搜索词：女士 Top100（图表按每页 20 词分页）；其余品类仍 Top30
-NATURAL_TOPN_BY_CATE = {"女士": 100, "男士": 30, "儿童": 30, "家居": 30}
+NATURAL_TOPN_BY_CATE = {"女士": 100, "男士": 30, "儿童": 30, "家居": 30, SHOES_BAGS_CATEGORY: 30}
 NATURAL_WOMEN_PAGE_SIZE = 20
+_SHOES_BAGS_KW_PATTERN = re.compile(r"鞋|包|靴|袋")
+
+
+def _keyword_core_text(keyword: str) -> str:
+    """去掉词尾品类后缀，便于判断鞋包相关词。"""
+    s = str(keyword).strip()
+    for suffix in CATEGORIES:
+        if s.endswith(suffix):
+            return s[: -len(suffix)].strip()
+        spaced = f" {suffix}"
+        if s.endswith(spaced):
+            return s[: -len(spaced)].strip()
+    return s
+
+
+def is_shoes_bags_keyword(keyword: str) -> bool:
+    return bool(_SHOES_BAGS_KW_PATTERN.search(_keyword_core_text(keyword)))
+
+
+def split_women_shoes_bags(df: pd.DataFrame) -> pd.DataFrame:
+    """将女士品类中鞋/包相关词单独归入「鞋包」品类。"""
+    if df is None or df.empty or "品类" not in df.columns or "关键词" not in df.columns:
+        return df
+    out = df.copy()
+    mask = (out["品类"] == "女士") & out["关键词"].map(is_shoes_bags_keyword)
+    out.loc[mask, "品类"] = SHOES_BAGS_CATEGORY
+    return out
 
 
 def to_num(df: pd.DataFrame, cols):
@@ -655,6 +686,7 @@ def load_data(paths: dict):
                 hot_frames.append(df_cur)
     
     hotwords = pd.concat(hot_frames, ignore_index=True) if hot_frames else pd.DataFrame()
+    hotwords = split_women_shoes_bags(hotwords)
 
     home_frames = []
     hc_cur = paths.get("home_cfg_cur", "")
@@ -752,6 +784,7 @@ def load_data(paths: dict):
                 home_frames.append(df_cur)
 
     home_config_words = pd.concat(home_frames, ignore_index=True) if home_frames else pd.DataFrame()
+    home_config_words = split_women_shoes_bags(home_config_words)
 
     natural_words = pd.DataFrame()
     npath_cur = Path(paths.get("natural_words_cur", ""))
@@ -824,11 +857,13 @@ def load_data(paths: dict):
                         merged[f"{col}_change"] = (merged[f"{col}_cur"] - merged[f"{col}_pre"]) / merged[f"{col}_pre"].replace(0, np.nan)
                 df_cur = merged
             
-            # 每个品类保留 TopN 个自然搜索词（女士 100，其余 30）
+            df_cur = split_women_shoes_bags(df_cur)
+
+            # 每个品类保留 TopN 个自然搜索词（女士 100，鞋包/其余 30）
             # 注意：merge后列名可能变成 搜索PV_cur，需要判断
             pv_sort_col = "搜索PV_cur" if "搜索PV_cur" in df_cur.columns else "搜索PV"
             natural_words_list = []
-            for cat in CATEGORIES:
+            for cat in SEARCH_PART_CATEGORIES:
                 topn = NATURAL_TOPN_BY_CATE.get(cat, 30)
                 cat_data = df_cur[df_cur["品类"] == cat].nlargest(topn, pv_sort_col)
                 natural_words_list.append(cat_data)
@@ -1002,6 +1037,225 @@ def type_weekly_summary(zara_by_type_cur: pd.DataFrame, zara_by_type_pre: pd.Dat
     return merged
 
 
+DIM_SCATTER_COLOR = "#bbbbbb"
+DIM_SCATTER_OPACITY = 0.15
+DIM_BUBBLE_SIZE = 8
+
+
+def _bubble_sizes_from_max(pv_series: pd.Series, max_pv: float) -> np.ndarray:
+    if max_pv == 0 or pv_series.empty:
+        return np.full(len(pv_series), 20.0)
+    return np.clip(pv_series / max_pv * 50 + 8, 8, 60)
+
+
+def _active_bubble_max_pv(
+    sub: pd.DataFrame,
+    pv_col: str,
+    dimmed_keywords: set | None,
+    fallback_max: float,
+) -> float:
+    dimmed = dimmed_keywords or set()
+    if "关键词" not in sub.columns or pv_col not in sub.columns:
+        return fallback_max
+    active = sub[~sub["关键词"].isin(dimmed)]
+    if active.empty:
+        return fallback_max
+    active_max = active[pv_col].max()
+    return float(active_max) if pd.notna(active_max) and active_max > 0 else fallback_max
+
+
+def scatter_dim_session_key(chart_key: str) -> str:
+    return f"scatter_dim_{chart_key}"
+
+
+def get_dimmed_keywords(chart_key: str) -> set:
+    raw = st.session_state.get(scatter_dim_session_key(chart_key), [])
+    return set(raw) if raw else set()
+
+
+def set_dimmed_keywords(chart_key: str, keywords: set | list) -> None:
+    st.session_state[scatter_dim_session_key(chart_key)] = sorted(keywords)
+
+
+def _keyword_from_selection_point(pt: dict) -> str | None:
+    cd = pt.get("customdata")
+    if cd is not None:
+        if isinstance(cd, (list, tuple, np.ndarray)) and len(cd) > 0:
+            return str(cd[0])
+        if isinstance(cd, dict) and cd:
+            return str(next(iter(cd.values())))
+    for key in ("text", "label"):
+        val = pt.get(key)
+        if val:
+            return str(val)
+    return None
+
+
+def _selection_signature(points: list) -> str:
+    simplified = []
+    for pt in points:
+        simplified.append(
+            (
+                pt.get("curve_number"),
+                pt.get("point_number"),
+                pt.get("point_index"),
+                _keyword_from_selection_point(pt),
+            )
+        )
+    return json.dumps(simplified, sort_keys=True, ensure_ascii=False)
+
+
+def apply_scatter_selection_toggle(event, chart_key: str) -> bool:
+    """点击/框选气泡时切换虚化状态；返回 True 表示 session 已变更。"""
+    if event is None:
+        return False
+    selection = getattr(event, "selection", None)
+    if selection is None:
+        return False
+    points = selection.get("points", []) if isinstance(selection, dict) else getattr(selection, "points", [])
+    if not points:
+        return False
+
+    last_sel_key = f"last_sel_{chart_key}"
+    sig = _selection_signature(points)
+    if sig == st.session_state.get(last_sel_key):
+        return False
+    st.session_state[last_sel_key] = sig
+
+    dimmed = get_dimmed_keywords(chart_key)
+    changed = False
+    for pt in points:
+        kw = _keyword_from_selection_point(pt)
+        if not kw:
+            continue
+        if kw in dimmed:
+            dimmed.discard(kw)
+        else:
+            dimmed.add(kw)
+        changed = True
+    if changed:
+        set_dimmed_keywords(chart_key, dimmed)
+    return changed
+
+
+def _add_perf_scatter_traces(
+    fig: go.Figure,
+    sub: pd.DataFrame,
+    ctr_col: str,
+    cvr_col: str,
+    pv_col: str,
+    uv_col: str,
+    dimmed_keywords: set | None,
+) -> None:
+    dimmed = dimmed_keywords or set()
+    sub = sub.copy()
+    sub["is_dimmed"] = sub["关键词"].isin(dimmed)
+    hover = (
+        "关键词: %{customdata[0]}<br>搜索PV: %{customdata[1]:,.0f}<br>搜索UV: %{customdata[2]:,.0f}"
+        "<br>CTR: %{x:.2%}<br>CVR: %{y:.2%}<extra></extra>"
+    )
+
+    def add_trace(group: pd.DataFrame, name: str, color: str, opacity: float, showlegend: bool = True, dimmed_trace: bool = False):
+        if group.empty:
+            return
+        text_color = "rgba(150,150,150,0.45)" if dimmed_trace else "black"
+        fig.add_trace(
+            go.Scatter(
+                x=group[ctr_col],
+                y=group[cvr_col],
+                mode="markers+text",
+                name=name,
+                text=group["标签"],
+                textposition="top center",
+                textfont=dict(size=8, color=text_color),
+                marker=dict(
+                    size=group["bubble_size"],
+                    sizemode="diameter",
+                    opacity=opacity,
+                    color=color,
+                ),
+                customdata=np.stack([group["关键词"], group[pv_col], group[uv_col]], axis=1),
+                hovertemplate=hover,
+                showlegend=showlegend,
+            )
+        )
+
+    has_score_change = "得分_change" in sub.columns
+    has_ctr_change = "CTR_change" in sub.columns
+    if has_score_change or has_ctr_change:
+        if has_score_change:
+            perf_good = sub["得分_change"] >= 0
+        else:
+            perf_good = sub["CTR_change"] >= 0
+        groups = [
+            (True, "#1f77b4", "表现上升（得分环比 ≥ 0）"),
+            (False, "#d62728", "表现下降（得分环比 < 0）"),
+        ]
+        for is_good, color, label in groups:
+            perf_mask = perf_good if is_good else ~perf_good
+            add_trace(sub[perf_mask & ~sub["is_dimmed"]], label, color, 0.7)
+            add_trace(
+                sub[perf_mask & sub["is_dimmed"]],
+                f"{label}（已虚化）",
+                DIM_SCATTER_COLOR,
+                DIM_SCATTER_OPACITY,
+                showlegend=False,
+                dimmed_trace=True,
+            )
+        good_active = sub[perf_good & ~sub["is_dimmed"]]
+        bad_active = sub[~perf_good & ~sub["is_dimmed"]]
+        if good_active.empty or bad_active.empty:
+            fig.update_layout(showlegend=True)
+    else:
+        add_trace(sub[~sub["is_dimmed"]], "关键词", "#1f77b4", 0.65)
+        add_trace(
+            sub[sub["is_dimmed"]],
+            "关键词（已虚化）",
+            DIM_SCATTER_COLOR,
+            DIM_SCATTER_OPACITY,
+            showlegend=False,
+            dimmed_trace=True,
+        )
+
+
+def render_interactive_category_scatter(scatter_factory, chart_key: str):
+    """渲染可点击虚化的品类散点图，返回表格数据。"""
+    dimmed = get_dimmed_keywords(chart_key)
+    fig, data = scatter_factory(dimmed)
+    if fig is None:
+        return None
+
+    st.caption("提示：点击或框选气泡可虚化/恢复该词；虚化词不参与气泡大小计算。右侧亦可批量选择。")
+    event = st.plotly_chart(
+        fig,
+        use_container_width=True,
+        key=f"plot_{chart_key}",
+        on_select="rerun",
+        selection_mode=("points", "box", "lasso"),
+        config={"scrollZoom": True},
+    )
+    if apply_scatter_selection_toggle(event, chart_key):
+        st.rerun()
+
+    ctrl_col, _ = st.columns([1, 3])
+    with ctrl_col:
+        opts = data["关键词"].tolist()
+        picked = st.multiselect(
+            "虚化词条",
+            opts,
+            default=sorted(get_dimmed_keywords(chart_key)),
+            key=f"ms_{chart_key}",
+        )
+        if set(picked) != get_dimmed_keywords(chart_key):
+            set_dimmed_keywords(chart_key, picked)
+            st.rerun()
+        if st.button("恢复全部", key=f"reset_{chart_key}"):
+            set_dimmed_keywords(chart_key, set())
+            st.session_state.pop(f"last_sel_{chart_key}", None)
+            st.rerun()
+    return data
+
+
 def category_scatter(
     df: pd.DataFrame,
     cate: str,
@@ -1010,11 +1264,13 @@ def category_scatter(
     plot_df=None,
     ref_pool_for_avg=None,
     bubble_max_df=None,
+    dimmed_keywords: set | None = None,
 ):
     """
     散点图：默认取该品类 TopN 词。若传入 plot_df，则只绘制该子集；
     ref_pool_for_avg 用于平均 CTR/CVR 虚线（如女士 Top100 全量）；
     bubble_max_df 若指定则用其 PV 最大值归一气泡（如女士分页时传 Top100 全池，各页气泡与全榜可比）；默认 None 表示用当前子集。
+    dimmed_keywords：虚化词集合，不参与气泡 max(PV) 计算，并以灰色低透明度展示。
     """
     if plot_df is not None:
         sub = plot_df.copy()
@@ -1039,112 +1295,36 @@ def category_scatter(
     max_src = bubble_max_df.copy() if bubble_max_df is not None else sub.copy()
     max_src = max_src.fillna(0)
     if len(max_src) and pv_col in max_src.columns:
-        max_pv = max_src[pv_col].max()
+        fallback_max = max_src[pv_col].max()
     else:
-        max_pv = 0
-    if max_pv == 0 and len(sub) and pv_col in sub.columns:
-        max_pv = sub[pv_col].max()
+        fallback_max = 0
+    if fallback_max == 0 and len(sub) and pv_col in sub.columns:
+        fallback_max = sub[pv_col].max()
 
-    if max_pv == 0:
-        sub["bubble_size"] = 20
-    else:
-        sub["bubble_size"] = np.clip(sub[pv_col] / max_pv * 50 + 8, 8, 60)
+    active_max = _active_bubble_max_pv(sub, pv_col, dimmed_keywords, fallback_max)
+    dimmed = dimmed_keywords or set()
+    is_dimmed = sub["关键词"].isin(dimmed)
+    sub["bubble_size"] = float(DIM_BUBBLE_SIZE)
+    if not sub.loc[~is_dimmed].empty:
+        sub.loc[~is_dimmed, "bubble_size"] = _bubble_sizes_from_max(
+            sub.loc[~is_dimmed, pv_col], active_max
+        ).astype(float)
 
     uv_col = "搜索UV_cur" if "搜索UV_cur" in sub.columns else "搜索UV"
     ctr_col = "CTR_cur" if "CTR_cur" in sub.columns else "CTR"
     cvr_col = "CVR_cur" if "CVR_cur" in sub.columns else "CVR"
-    atc_col = "ATC_cur" if "ATC_cur" in sub.columns else "ATC"
 
     avg_ctr = pool_avg[ctr_col].mean() if len(pool_avg) else np.nan
     avg_cvr = pool_avg[cvr_col].mean() if len(pool_avg) else np.nan
     word_count = len(sub)
     pool_total = len(pool_avg) if ref_pool_for_avg is not None else word_count
+    dimmed_count = int(is_dimmed.sum())
     
-    # 显示全部词标签，大小缩小40%
     sub["标签"] = sub["关键词"]
     sub = attach_keyword_score_change(sub)
 
     fig = go.Figure()
-
-    # 根据「得分环比」区分表现好/差的词，使用不同颜色（若无得分环比，则退化为 CTR 环比）
-    has_score_change = "得分_change" in sub.columns
-    has_ctr_change = "CTR_change" in sub.columns
-    if has_score_change or has_ctr_change:
-        if has_score_change:
-            good_mask = sub["得分_change"] >= 0
-            bad_mask = sub["得分_change"] < 0
-        else:
-            good_mask = sub["CTR_change"] >= 0
-            bad_mask = sub["CTR_change"] < 0
-
-        good_sub = sub[good_mask]
-        bad_sub = sub[bad_mask]
-
-        if not good_sub.empty:
-            fig.add_trace(
-                go.Scatter(
-                    x=good_sub[ctr_col],
-                    y=good_sub[cvr_col],
-                    mode="markers+text",
-                    name="表现上升（得分环比 ≥ 0）",
-                    text=good_sub["标签"],
-                    textposition="top center",
-                    textfont=dict(size=8),
-                    marker=dict(
-                        size=good_sub["bubble_size"],
-                        sizemode="diameter",
-                        opacity=0.7,
-                        color="#1f77b4",  # 蓝色：好
-                    ),
-                    customdata=np.stack(
-                        [good_sub["关键词"], good_sub[pv_col], good_sub[uv_col]], axis=1
-                    ),
-                    hovertemplate="关键词: %{customdata[0]}<br>搜索PV: %{customdata[1]:,.0f}<br>搜索UV: %{customdata[2]:,.0f}<br>CTR: %{x:.2%}<br>CVR: %{y:.2%}<extra></extra>",
-                )
-            )
-
-        if not bad_sub.empty:
-            fig.add_trace(
-                go.Scatter(
-                    x=bad_sub[ctr_col],
-                    y=bad_sub[cvr_col],
-                    mode="markers+text",
-                    name="表现下降（得分环比 < 0）",
-                    text=bad_sub["标签"],
-                    textposition="top center",
-                    textfont=dict(size=8),
-                    marker=dict(
-                        size=bad_sub["bubble_size"],
-                        sizemode="diameter",
-                        opacity=0.7,
-                        color="#d62728",  # 红色：差
-                    ),
-                    customdata=np.stack(
-                        [bad_sub["关键词"], bad_sub[pv_col], bad_sub[uv_col]], axis=1
-                    ),
-                    hovertemplate="关键词: %{customdata[0]}<br>搜索PV: %{customdata[1]:,.0f}<br>搜索UV: %{customdata[2]:,.0f}<br>CTR: %{x:.2%}<br>CVR: %{y:.2%}<extra></extra>",
-                )
-            )
-
-        # 如果某一类为空（全部好或全部差），避免图例缺失时看不懂颜色含义
-        if good_sub.empty or bad_sub.empty:
-            fig.update_layout(showlegend=True)
-    else:
-        # 无环比数据时，保持统一颜色
-        fig.add_trace(
-            go.Scatter(
-                x=sub[ctr_col],
-                y=sub[cvr_col],
-                mode="markers+text",
-                text=sub["标签"],
-                textposition="top center",
-                textfont=dict(size=8),
-                marker=dict(size=sub["bubble_size"], sizemode="diameter", opacity=0.65),
-                customdata=np.stack([sub["关键词"], sub[pv_col], sub[uv_col]], axis=1),
-                hovertemplate="关键词: %{customdata[0]}<br>搜索PV: %{customdata[1]:,.0f}<br>搜索UV: %{customdata[2]:,.0f}<br>CTR: %{x:.2%}<br>CVR: %{y:.2%}<extra></extra>",
-            )
-        )
-    
+    _add_perf_scatter_traces(fig, sub, ctr_col, cvr_col, pv_col, uv_col, dimmed_keywords)
     # 添加平均值虚线和注释
     if not np.isnan(avg_ctr):
         fig.add_vline(x=avg_ctr, line_dash="dash", line_color="green", opacity=0.6)
@@ -1173,9 +1353,14 @@ def category_scatter(
         )
     
     if ref_pool_for_avg is not None:
-        ann_note = f"本页词数: {word_count}/{pool_total}（均值线=Top{pool_total} 平均CTR/CVR）"
+        ann_note = f"本页词数: {word_count}/{pool_total}（均值线=Top{pool_total} 平均CTR/CVR"
+        if dimmed_count:
+            ann_note += f"，已虚化 {dimmed_count} 个"
+        ann_note += "）"
     else:
         ann_note = f"图表中词数: {word_count}/全量数据"
+        if dimmed_count:
+            ann_note += f"（已虚化 {dimmed_count} 个）"
     fig.add_annotation(
         text=ann_note,
         xref="paper",
@@ -1454,8 +1639,8 @@ def run_data_quality_checks(mini, zara_daily_cur, zara_daily_pre, zara_by_type_c
     if natural_words is not None and not natural_words.empty:
         results.append(("自然词-关键词列", "关键词" in natural_words.columns, ""))
         if "品类" in natural_words.columns:
-            bad_cat = ~natural_words["品类"].isin(CATEGORIES)
-            results.append(("自然词-品类在CATEGORIES内", not bad_cat.any(), f"异常品类: {natural_words.loc[bad_cat, '品类'].unique().tolist()}" if bad_cat.any() else ""))
+            bad_cat = ~natural_words["品类"].isin(SEARCH_PART_CATEGORIES)
+            results.append(("自然词-品类在SEARCH_PART_CATEGORIES内", not bad_cat.any(), f"异常品类: {natural_words.loc[bad_cat, '品类'].unique().tolist()}" if bad_cat.any() else ""))
     else:
         results.append(("自然词-有数据", True, "无自然词数据"))
 
@@ -1750,15 +1935,22 @@ def render():
 
     st.subheader("4) 搜索词分析")
     
-    for cate in CATEGORIES:
+    for cate in SEARCH_PART_CATEGORIES:
         st.markdown(f"### {cate}")
+        if cate == SHOES_BAGS_CATEGORY:
+            st.caption("由女士品类中筛出鞋、包、靴、袋等相关搜索词，单独作为鞋包类目展示。")
         st.markdown(f"**{cate} - 热词分析**")
-        fig_hot, data_hot = category_scatter(hotwords, cate, f"{cate} 热词：CTR vs CVR（气泡=搜索PV）")
-        if fig_hot is None:
+        hot_chart_key = f"{cate}_hot"
+        hot_title = f"{cate} 热词：CTR vs CVR（气泡=搜索PV）"
+        data_hot = render_interactive_category_scatter(
+            lambda dimmed, _c=cate, _t=hot_title: category_scatter(
+                hotwords, _c, _t, dimmed_keywords=dimmed
+            ),
+            hot_chart_key,
+        )
+        if data_hot is None:
             st.info("该品类暂无热词数据。")
         else:
-            st.plotly_chart(fig_hot, use_container_width=True)
-            # 显示热词数据表格：按得分环比（或 CTR 环比）区分表现好/差
             good_df, bad_df, perf_basis = split_keyword_perf_groups(data_hot)
             if perf_basis != "无环比":
                 col_good, col_bad = st.columns(2)
@@ -1801,11 +1993,17 @@ def render():
                 )
 
         st.markdown(f"**{cate} - 首页配置词分析**")
-        fig_home, data_home = category_scatter(home_config_words, cate, f"{cate} 首页配置词：CTR vs CVR（气泡=搜索PV）")
-        if fig_home is None:
+        home_chart_key = f"{cate}_home"
+        home_title = f"{cate} 首页配置词：CTR vs CVR（气泡=搜索PV）"
+        data_home = render_interactive_category_scatter(
+            lambda dimmed, _c=cate, _t=home_title: category_scatter(
+                home_config_words, _c, _t, dimmed_keywords=dimmed
+            ),
+            home_chart_key,
+        )
+        if data_home is None:
             st.info("该品类暂无首页配置词数据。")
         else:
-            st.plotly_chart(fig_home, use_container_width=True)
             good_h, bad_h, perf_basis_h = split_keyword_perf_groups(data_home)
             if perf_basis_h != "无环比":
                 col_gh, col_bh = st.columns(2)
@@ -1846,8 +2044,9 @@ def render():
                 )
 
         st.markdown(f"**{cate} - 自然词分析**")
-        fig_nat, data_nat = None, None
+        data_nat = None
         women_natural_skip_tables = False
+        nat_chart_key = f"{cate}_nat"
         if cate == "女士":
             pool_w = women_natural_top_pool(natural_words)
             if pool_w.empty:
@@ -1869,64 +2068,73 @@ def render():
                 hi = min(lo + NATURAL_WOMEN_PAGE_SIZE, n_pool)
                 page_df = pool_w.iloc[lo:hi].copy()
                 title_nat = f"{cate} 自然词：CTR vs CVR（气泡=搜索PV）｜{seg} / Top{n_pool}"
-                fig_nat, data_nat = category_scatter(
-                    natural_words,
-                    cate,
-                    title_nat,
-                    plot_df=page_df,
-                    ref_pool_for_avg=pool_w,
-                    bubble_max_df=pool_w,
+                nat_chart_key = f"{cate}_nat_{seg}"
+                data_nat = render_interactive_category_scatter(
+                    lambda dimmed, _pd=page_df, _pw=pool_w, _t=title_nat: category_scatter(
+                        natural_words,
+                        cate,
+                        _t,
+                        plot_df=_pd,
+                        ref_pool_for_avg=_pw,
+                        bubble_max_df=_pw,
+                        dimmed_keywords=dimmed,
+                    ),
+                    nat_chart_key,
                 )
         else:
-            fig_nat, data_nat = category_scatter(
-                natural_words, cate, f"{cate} 自然词：CTR vs CVR（气泡=搜索PV）"
-            )
-
-        if not women_natural_skip_tables:
-            if fig_nat is None:
+            nat_title = f"{cate} 自然词：CTR vs CVR（气泡=搜索PV）"
+            nat_probe = category_scatter(natural_words, cate, nat_title)
+            if nat_probe[0] is None:
                 st.info("该品类暂无自然词数据（按末尾品类提取后为空）。")
+                women_natural_skip_tables = True
             else:
-                st.plotly_chart(fig_nat, use_container_width=True)
-                # 显示自然词数据表格：按得分环比（或 CTR 环比）区分表现好/差（与当前页/当前图一致）
-                good_nat, bad_nat, perf_basis_n = split_keyword_perf_groups(data_nat)
-                if perf_basis_n != "无环比":
-                    col_good_n, col_bad_n = st.columns(2)
-                    with col_good_n:
-                        st.markdown(f"表现上升（{perf_basis_n} ≥ 0）")
-                        if good_nat.empty:
-                            st.caption("暂无符合条件的词。")
-                        else:
-                            table_data_gn, styled_cols_gn = display_keyword_table(good_nat)
-                            styled_df_gn = apply_styler_change(table_data_gn.style, styled_cols_gn)
-                            st.dataframe(
-                                styled_df_gn,
-                                use_container_width=True,
-                                height=380,
-                                hide_index=True,
-                            )
+                data_nat = render_interactive_category_scatter(
+                    lambda dimmed, _c=cate, _t=nat_title: category_scatter(
+                        natural_words, _c, _t, dimmed_keywords=dimmed
+                    ),
+                    nat_chart_key,
+                )
 
-                    with col_bad_n:
-                        st.markdown(f"表现下降（{perf_basis_n} < 0）")
-                        if bad_nat.empty:
-                            st.caption("暂无符合条件的词。")
-                        else:
-                            table_data_bn, styled_cols_bn = display_keyword_table(bad_nat)
-                            styled_df_bn = apply_styler_change(table_data_bn.style, styled_cols_bn)
-                            st.dataframe(
-                                styled_df_bn,
-                                use_container_width=True,
-                                height=380,
-                                hide_index=True,
-                            )
-                else:
-                    table_data_nat, styled_cols_nat = display_keyword_table(data_nat)
-                    styled_df_nat = apply_styler_change(table_data_nat.style, styled_cols_nat)
-                    st.dataframe(
-                        styled_df_nat,
-                        use_container_width=True,
-                        height=400,
-                        hide_index=True,
-                    )
+        if not women_natural_skip_tables and data_nat is not None:
+            good_nat, bad_nat, perf_basis_n = split_keyword_perf_groups(data_nat)
+            if perf_basis_n != "无环比":
+                col_good_n, col_bad_n = st.columns(2)
+                with col_good_n:
+                    st.markdown(f"表现上升（{perf_basis_n} ≥ 0）")
+                    if good_nat.empty:
+                        st.caption("暂无符合条件的词。")
+                    else:
+                        table_data_gn, styled_cols_gn = display_keyword_table(good_nat)
+                        styled_df_gn = apply_styler_change(table_data_gn.style, styled_cols_gn)
+                        st.dataframe(
+                            styled_df_gn,
+                            use_container_width=True,
+                            height=380,
+                            hide_index=True,
+                        )
+
+                with col_bad_n:
+                    st.markdown(f"表现下降（{perf_basis_n} < 0）")
+                    if bad_nat.empty:
+                        st.caption("暂无符合条件的词。")
+                    else:
+                        table_data_bn, styled_cols_bn = display_keyword_table(bad_nat)
+                        styled_df_bn = apply_styler_change(table_data_bn.style, styled_cols_bn)
+                        st.dataframe(
+                            styled_df_bn,
+                            use_container_width=True,
+                            height=380,
+                            hide_index=True,
+                        )
+            else:
+                table_data_nat, styled_cols_nat = display_keyword_table(data_nat)
+                styled_df_nat = apply_styler_change(table_data_nat.style, styled_cols_nat)
+                st.dataframe(
+                    styled_df_nat,
+                    use_container_width=True,
+                    height=400,
+                    hide_index=True,
+                )
 
     st.subheader("5) 数据校验")
     disp_checks = run_display_consistency_checks(wk, contrib, by_type, zara_daily_cur, zara_daily_pre, mini, zara_by_type_cur, zara_by_type_pre)
