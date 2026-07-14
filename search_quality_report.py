@@ -116,6 +116,19 @@ def pick_latest_valid_mini_xlsx(mini_dir: Path) -> str:
     return ""
 
 
+def resolve_period_xlsx(directory: Path, period: str, exact_filename: str) -> str:
+    """按周期解析目录下的 xlsx；精确文件名不存在时回退同周期前缀匹配（兼容导出命名差异）。"""
+    if not period or not directory.exists():
+        return ""
+    exact = directory / exact_filename
+    if exact.is_file():
+        return str(exact)
+    matches = sorted(directory.glob(f"{period}_*.xlsx"))
+    if matches:
+        return str(matches[-1])
+    return ""
+
+
 def build_default_paths() -> dict:
     base_dir = next((p for p in DEFAULT_BASE_DIR_CANDIDATES if p.exists()), DEFAULT_BASE_DIR_CANDIDATES[-1])
     latest_period, prev_period = find_latest_periods(base_dir)
@@ -135,10 +148,22 @@ def build_default_paths() -> dict:
     paths = {
         "mini": mini_path,
         # 当前周和上周数据分别来自不同文件
-        "zara_daily_cur": str(base_dir / "日度数据整体" / f"{latest_period}_zara日度数据.xlsx") if latest_period else "",
-        "zara_daily_pre": str(base_dir / "日度数据整体" / f"{prev_period}_zara日度数据.xlsx") if prev_period else "",
-        "zara_by_type_cur": str(base_dir / "日度数据-by搜索类型" / f"{latest_period}_zara日度数据-by搜索类型.xlsx") if latest_period else "",
-        "zara_by_type_pre": str(base_dir / "日度数据-by搜索类型" / f"{prev_period}_zara日度数据-by搜索类型.xlsx") if prev_period else "",
+        "zara_daily_cur": resolve_period_xlsx(
+            base_dir / "日度数据整体", latest_period, f"{latest_period}_zara日度数据.xlsx"
+        ) if latest_period else "",
+        "zara_daily_pre": resolve_period_xlsx(
+            base_dir / "日度数据整体", prev_period, f"{prev_period}_zara日度数据.xlsx"
+        ) if prev_period else "",
+        "zara_by_type_cur": resolve_period_xlsx(
+            base_dir / "日度数据-by搜索类型",
+            latest_period,
+            f"{latest_period}_zara日度数据-by搜索类型.xlsx",
+        ) if latest_period else "",
+        "zara_by_type_pre": resolve_period_xlsx(
+            base_dir / "日度数据-by搜索类型",
+            prev_period,
+            f"{prev_period}_zara日度数据-by搜索类型.xlsx",
+        ) if prev_period else "",
         # 热词：当前周（使用热词文件夹的周期）
         "hot_women_cur": str(base_dir / "热词部分" / f"{hot_latest}热词" / "女士.xlsx") if hot_latest else "",
         "hot_men_cur": str(base_dir / "热词部分" / f"{hot_latest}热词" / "男士.xlsx") if hot_latest else "",
@@ -1861,8 +1886,11 @@ def render():
     paths = build_default_paths()
 
     required = ["mini", "zara_daily_cur", "zara_by_type_cur", "hot_women_cur", "hot_men_cur", "hot_kids_cur", "hot_home_cur"]
-    if not all(Path(paths[k]).exists() for k in required):
+    missing = [k for k in required if not paths.get(k) or not Path(paths[k]).exists()]
+    if missing:
         st.error("必需数据文件缺失，请检查 zara周报数据源 目录下是否有最新导出文件。")
+        for key in missing:
+            st.caption(f"缺失：{key} → {paths.get(key, '(路径为空)')}")
         st.stop()
 
     mini, zara_daily_cur, zara_daily_pre, zara_by_type_cur, zara_by_type_pre, hotwords, natural_words, home_config_words = load_data(paths)
