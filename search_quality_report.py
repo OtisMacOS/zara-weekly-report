@@ -1885,7 +1885,8 @@ def render():
     render_sidebar_toc()
     paths = build_default_paths()
 
-    required = ["mini", "zara_daily_cur", "zara_by_type_cur", "hot_women_cur", "hot_men_cur", "hot_kids_cur", "hot_home_cur"]
+    # 家居热词并非每周都会导出；缺失时 load_data 会跳过，页面对应位置显示“暂无热词数据”。
+    required = ["mini", "zara_daily_cur", "zara_by_type_cur", "hot_women_cur", "hot_men_cur", "hot_kids_cur"]
     missing = [k for k in required if not paths.get(k) or not Path(paths[k]).exists()]
     if missing:
         st.error("必需数据文件缺失，请检查 zara周报数据源 目录下是否有最新导出文件。")
