@@ -623,7 +623,7 @@ def load_data(paths: dict):
 
     mini = read_excel_checked(mini_path, "小程序大盘").copy()
     mini["date"] = pd.to_datetime(mini["日期"].astype(str), errors="coerce")
-    mini = to_num(mini, ["成交金额", "成交人数", "UV", "UV价值"]).dropna(subset=["date"]).sort_values("date")
+    mini = to_num(mini, ["成交金额", "成交人数", "下单金额", "UV", "UV价值"]).dropna(subset=["date"]).sort_values("date")
 
     # 加载当前周和上周的日度数据
     zara_daily_cur = pd.read_excel(paths["zara_daily_cur"], header=2).copy()
@@ -957,28 +957,33 @@ def contribution_summary(wk: dict, mini: pd.DataFrame):
     mini_cur = mini[(mini["date"] >= cur_start) & (mini["date"] <= cur_end)]
     mini_pre = mini[(mini["date"] >= pre_start) & (mini["date"] <= pre_end)]
 
-    cur_amt_share = wk["cur_total"]["购买总金额"] / mini_cur["成交金额"].sum() if mini_cur["成交金额"].sum() else np.nan
-    pre_amt_share = wk["pre_total"]["购买总金额"] / mini_pre["成交金额"].sum() if mini_pre["成交金额"].sum() else np.nan
+    # 搜索金额占比 = 搜索购买金额 / 小程序下单金额；搜索人数占比 = 搜索UV / 小程序总UV
+    cur_amt_share = wk["cur_total"]["购买总金额"] / mini_cur["下单金额"].sum() if mini_cur["下单金额"].sum() else np.nan
+    pre_amt_share = wk["pre_total"]["购买总金额"] / mini_pre["下单金额"].sum() if mini_pre["下单金额"].sum() else np.nan
 
-    cur_buyer_share = wk["cur_total"]["购买人数"] / mini_cur["成交人数"].sum() if mini_cur["成交人数"].sum() else np.nan
-    pre_buyer_share = wk["pre_total"]["购买人数"] / mini_pre["成交人数"].sum() if mini_pre["成交人数"].sum() else np.nan
+    cur_search_uv_share = wk["cur_total"]["搜索UV"] / mini_cur["UV"].sum() if mini_cur["UV"].sum() else np.nan
+    pre_search_uv_share = wk["pre_total"]["搜索UV"] / mini_pre["UV"].sum() if mini_pre["UV"].sum() else np.nan
 
     cur_uv_value = wk["metrics"]["UV_VALUE"][0]
     pre_uv_value = wk["metrics"]["UV_VALUE"][1]
 
-    daily_cur = wk["cur"][["date", "购买总金额", "购买人数", "搜索UV", "CTR", "ATC", "CVR", "UV_VALUE"]].merge(
-        mini[["date", "成交金额", "成交人数"]], on="date", how="left"
+    daily_cur = wk["cur"][["date", "购买总金额", "搜索UV", "CTR", "ATC", "CVR", "UV_VALUE"]].merge(
+        mini[["date", "下单金额", "UV"]], on="date", how="left"
     )
-    daily_pre = wk["pre"][["date", "购买总金额", "购买人数", "搜索UV", "CTR", "ATC", "CVR", "UV_VALUE"]].merge(
-        mini[["date", "成交金额", "成交人数"]], on="date", how="left"
+    daily_pre = wk["pre"][["date", "购买总金额", "搜索UV", "CTR", "ATC", "CVR", "UV_VALUE"]].merge(
+        mini[["date", "下单金额", "UV"]], on="date", how="left"
     )
 
     for d in [daily_cur, daily_pre]:
-        d["金额占比"] = d["购买总金额"] / d["成交金额"].replace(0, np.nan)
-        d["人数占比"] = d["购买人数"] / d["成交人数"].replace(0, np.nan)
+        d["金额占比"] = d["购买总金额"] / d["下单金额"].replace(0, np.nan)
+        d["人数占比"] = d["搜索UV"] / d["UV"].replace(0, np.nan)
 
     return {
-        "shares": {"金额占比": (cur_amt_share, pre_amt_share), "人数占比": (cur_buyer_share, pre_buyer_share), "UV_VALUE": (cur_uv_value, pre_uv_value)},
+        "shares": {
+            "金额占比": (cur_amt_share, pre_amt_share),
+            "人数占比": (cur_search_uv_share, pre_search_uv_share),
+            "UV_VALUE": (cur_uv_value, pre_uv_value),
+        },
         "daily_cur": daily_cur,
         "daily_pre": daily_pre,
     }
@@ -1519,14 +1524,14 @@ def run_display_consistency_checks(wk, contrib, by_type, zara_daily_cur, zara_da
     pre_end = cur_start - pd.Timedelta(days=1)
     mini_cur = mini[(mini["date"] >= cur_start) & (mini["date"] <= cur_end)]
     mini_pre = mini[(mini["date"] >= pre_start) & (mini["date"] <= pre_end)]
-    cur_amt_sum = mini_cur["成交金额"].sum()
-    pre_amt_sum = mini_pre["成交金额"].sum()
-    cur_buyer_sum = mini_cur["成交人数"].sum()
-    pre_buyer_sum = mini_pre["成交人数"].sum()
+    cur_amt_sum = mini_cur["下单金额"].sum()
+    pre_amt_sum = mini_pre["下单金额"].sum()
+    cur_uv_sum = mini_cur["UV"].sum()
+    pre_uv_sum = mini_pre["UV"].sum()
     cur_amt_share_recalc = (wk["cur_total"]["购买总金额"] / cur_amt_sum) if cur_amt_sum else np.nan
     pre_amt_share_recalc = (wk["pre_total"]["购买总金额"] / pre_amt_sum) if pre_amt_sum else np.nan
-    cur_buyer_share_recalc = (wk["cur_total"]["购买人数"] / cur_buyer_sum) if cur_buyer_sum else np.nan
-    pre_buyer_share_recalc = (wk["pre_total"]["购买人数"] / pre_buyer_sum) if pre_buyer_sum else np.nan
+    cur_buyer_share_recalc = (wk["cur_total"]["搜索UV"] / cur_uv_sum) if cur_uv_sum else np.nan
+    pre_buyer_share_recalc = (wk["pre_total"]["搜索UV"] / pre_uv_sum) if pre_uv_sum else np.nan
     results.append(("贡献-金额占比-本周", _num_close(contrib["shares"]["金额占比"][0], cur_amt_share_recalc), ""))
     results.append(("贡献-金额占比-上周", _num_close(contrib["shares"]["金额占比"][1], pre_amt_share_recalc), ""))
     results.append(("贡献-人数占比-本周", _num_close(contrib["shares"]["人数占比"][0], cur_buyer_share_recalc), ""))
@@ -1798,7 +1803,7 @@ def build_pdf_bytes(wk: dict, contrib: dict, by_type: pd.DataFrame):
             f"UV Value: {wk['metrics']['UV_VALUE'][0]:.2f} (WoW {safe_pct_change(wk['metrics']['UV_VALUE'][0], wk['metrics']['UV_VALUE'][1]):.2%})",
             "",
             f"Share(Amount): {contrib['shares']['金额占比'][0]:.2%}",
-            f"Share(Buyer): {contrib['shares']['人数占比'][0]:.2%}",
+            f"Share(UV): {contrib['shares']['人数占比'][0]:.2%}",
             "",
             "By Type CVR (Current Week):",
         ]
@@ -1925,6 +1930,7 @@ def render():
 
     section_anchor("sec-2")
     st.subheader("2) 搜索对大盘贡献")
+    st.caption("口径：搜索人数占比 = 搜索UV ÷ 小程序大盘总UV。")
     s1, s2, s3 = st.columns(3)
     for i, name in enumerate(["金额占比", "人数占比", "UV_VALUE"]):
         cur, pre = contrib["shares"][name]
@@ -1938,8 +1944,9 @@ def render():
     # 图2-1: 占比（本周实线，上周虚线）
     fig_share = go.Figure()
     for metric, color in [("金额占比", "#1f77b4"), ("人数占比", "#ff7f0e")]:
-        fig_share.add_trace(go.Scatter(x=contrib["daily_cur"]["date"], y=contrib["daily_cur"][metric], mode="lines+markers+text", name=f"{metric}-本周", line=dict(color=color), text=[f"{v:.1%}" if pd.notna(v) else "-" for v in contrib["daily_cur"][metric]], textposition="top center"))
-        fig_share.add_trace(go.Scatter(x=contrib["daily_pre"]["date"], y=contrib["daily_pre"][metric], mode="lines+markers+text", name=f"{metric}-上周", line=dict(color=color, dash="dash"), text=[f"{v:.1%}" if pd.notna(v) else "-" for v in contrib["daily_pre"][metric]], textposition="bottom center"))
+        display_metric = "搜索人数占比" if metric == "人数占比" else metric
+        fig_share.add_trace(go.Scatter(x=contrib["daily_cur"]["date"], y=contrib["daily_cur"][metric], mode="lines+markers+text", name=f"{display_metric}-本周", line=dict(color=color), text=[f"{v:.1%}" if pd.notna(v) else "-" for v in contrib["daily_cur"][metric]], textposition="top center"))
+        fig_share.add_trace(go.Scatter(x=contrib["daily_pre"]["date"], y=contrib["daily_pre"][metric], mode="lines+markers+text", name=f"{display_metric}-上周", line=dict(color=color, dash="dash"), text=[f"{v:.1%}" if pd.notna(v) else "-" for v in contrib["daily_pre"][metric]], textposition="bottom center"))
     fig_share.update_layout(height=380, margin=dict(l=20, r=20, t=20, b=20), yaxis=dict(title="占比", tickformat=".0%"))
     st.plotly_chart(fig_share, use_container_width=True, config=PLOTLY_CHART_CONFIG)
 
