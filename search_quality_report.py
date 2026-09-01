@@ -245,6 +245,8 @@ SEARCH_PART_CATEGORIES = CATEGORIES + [SHOES_BAGS_CATEGORY]
 NATURAL_TOPN_BY_CATE = {"女士": 100, "男士": 30, "儿童": 30, "家居": 30, SHOES_BAGS_CATEGORY: 30}
 NATURAL_WOMEN_PAGE_SIZE = 20
 _SHOES_BAGS_KW_PATTERN = re.compile(r"鞋|包|靴|袋")
+# 个别女士服装词虽然包含“包”等字样，但不应拆分到鞋包类。
+_WOMEN_SHOES_BAGS_EXCEPTIONS = {"包臀裙"}
 # 禁用滚轮缩放，避免浏览页面时误触图表
 PLOTLY_CHART_CONFIG = {"scrollZoom": False}
 
@@ -262,7 +264,10 @@ def _keyword_core_text(keyword: str) -> str:
 
 
 def is_shoes_bags_keyword(keyword: str) -> bool:
-    return bool(_SHOES_BAGS_KW_PATTERN.search(_keyword_core_text(keyword)))
+    core = _keyword_core_text(keyword)
+    if core in _WOMEN_SHOES_BAGS_EXCEPTIONS:
+        return False
+    return bool(_SHOES_BAGS_KW_PATTERN.search(core))
 
 
 def split_women_shoes_bags(df: pd.DataFrame) -> pd.DataFrame:
