@@ -13,6 +13,14 @@ from matplotlib import pyplot as plt
 from matplotlib.backends.backend_pdf import PdfPages
 from plotly.subplots import make_subplots
 
+from spark_data import (
+    complete_week_windows,
+    fetch_by_type_funnel,
+    fetch_daily_funnel,
+    fetch_hotwords,
+    fetch_natural_words,
+)
+
 # 固定数据源：优先使用真实数据目录「zara周报数据源」，无则回退到「演示」
 DEFAULT_BASE_DIR_CANDIDATES = [
     Path(__file__).parent / "zara周报数据源",
@@ -285,6 +293,92 @@ def to_num(df: pd.DataFrame, cols):
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
     return df
+
+
+SOURCE_EXCEL = "原始 Excel"
+SOURCE_SPARK = "Zara Spark"
+
+
+def _prepare_spark_hotwords(cur_raw: pd.DataFrame, pre_raw: pd.DataFrame | None) -> pd.DataFrame:
+    """Normalize Spark hot-word aggregates to the dashboard's existing schema."""
+    value_cols = ["搜索PV", "搜索UV", "点击UV", "加购UV", "购买人数", "购买总金额"]
+
+    def prepare(raw: pd.DataFrame | None) -> pd.DataFrame:
+        if raw is None or raw.empty:
+            return pd.DataFrame()
+        out = raw.copy()
+        out["关键词"] = out["关键词"].astype(str).str.strip()
+        out["品类"] = out["品类"].astype(str).str.strip()
+        out = out[out["关键词"].ne("") & out["品类"].isin(CATEGORIES)].copy()
+        out = to_num(out, [*value_cols, "上架天数"])
+        return uv_rates(out)
+
+    cur = prepare(cur_raw)
+    pre = prepare(pre_raw)
+    if cur.empty:
+        return cur
+    if pre.empty:
+        for col in ["搜索PV", "搜索UV", "点击UV", "加购UV", "购买人数", "CTR", "ATC", "CVR"]:
+            cur[f"{col}_cur"] = cur[col]
+            cur[f"{col}_change"] = np.nan
+        return cur
+
+    merge_cols = ["关键词", "品类"]
+    pre_cols = merge_cols + ["搜索PV", "搜索UV", "点击UV", "加购UV", "购买人数", "CTR", "ATC", "CVR"]
+    merged = cur.merge(
+        pre[pre_cols],
+        on=merge_cols,
+        how="left",
+        suffixes=("_cur", "_pre"),
+    )
+    for col in ["搜索PV", "搜索UV", "点击UV", "加购UV", "购买人数", "CTR", "ATC", "CVR"]:
+        merged[f"{col}_change"] = (
+            merged[f"{col}_cur"] - merged[f"{col}_pre"]
+        ) / merged[f"{col}_pre"].replace(0, np.nan)
+    return merged
+
+
+def _prepare_spark_period_frame(raw: pd.DataFrame | None) -> pd.DataFrame:
+    """Normalize a Spark word-level aggregate to the common dashboard schema."""
+    if raw is None or raw.empty:
+        return pd.DataFrame()
+    out = raw.copy()
+    out["关键词"] = out["关键词"].astype(str).str.strip()
+    out["品类"] = out["品类"].astype(str).str.strip()
+    out = out[out["关键词"].ne("") & out["品类"].isin(CATEGORIES)].copy()
+    out = to_num(out, ["上架天数", "搜索PV", "搜索UV", "点击UV", "加购UV", "购买人数", "购买总金额"])
+    out["购买总金额"] = out["购买总金额"].fillna(0)
+    return uv_rates(out)
+
+
+def _prepare_spark_natural_words(cur_raw: pd.DataFrame, pre_raw: pd.DataFrame | None) -> pd.DataFrame:
+    """Merge Spark natural-word periods and keep the same columns as Excel mode."""
+    cur = split_women_shoes_bags(_prepare_spark_period_frame(cur_raw))
+    pre = split_women_shoes_bags(_prepare_spark_period_frame(pre_raw))
+    if cur.empty:
+        return cur
+    compare_cols = ["搜索PV", "搜索UV", "点击UV", "加购UV", "购买人数", "CTR", "ATC", "CVR"]
+    if pre.empty:
+        for col in compare_cols:
+            cur[f"{col}_cur"] = cur[col]
+            cur[f"{col}_change"] = np.nan
+        return cur
+    merged = cur.merge(
+        pre[["关键词", "品类", *compare_cols]],
+        on=["关键词", "品类"],
+        how="left",
+        suffixes=("_cur", "_pre"),
+    )
+    for col in compare_cols:
+        merged[f"{col}_change"] = (
+            merged[f"{col}_cur"] - merged[f"{col}_pre"]
+        ) / merged[f"{col}_pre"].replace(0, np.nan)
+    pv_col = "搜索PV_cur"
+    top_frames = []
+    for category in SEARCH_PART_CATEGORIES:
+        topn = NATURAL_TOPN_BY_CATE.get(category, 30)
+        top_frames.append(merged[merged["品类"] == category].nlargest(topn, pv_col))
+    return pd.concat(top_frames, ignore_index=True) if top_frames else merged
 
 
 def fmt_with_change(value, change):
@@ -611,8 +705,83 @@ def _prepare_home_config_sheet(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-@st.cache_data(show_spinner=False)
-def load_data(paths: dict):
+@st.cache_data(show_spinner=False, ttl=3600)
+def _load_spark_data(paths: dict):
+    """Load every non-mini section from the same Zara Spark source.
+
+    The mini-program dashboard is deliberately still read from Excel.  No
+    search-type, hot-word, natural-word, or homepage-config Excel file is
+    touched in this branch.
+    """
+    mini_path = (paths.get("mini") or "").strip()
+    pmini = Path(mini_path)
+    if mini_path and pmini.is_file() and pmini.suffix.lower() == ".xlsx" and not is_valid_ooxml_xlsx(pmini):
+        alt = pick_latest_valid_mini_xlsx(pmini.parent)
+        if alt:
+            mini_path = alt
+        else:
+            raise ValueError(
+                "小程序大盘：当前文件不是有效 xlsx（非 ZIP / 常为接口错误正文），且同目录无其他可用 .xlsx。"
+                "请重新导出或替换为 Excel 真实另存。\n路径："
+                f"{pmini}"
+            )
+    mini = read_excel_checked(mini_path, "小程序大盘").copy()
+    mini["date"] = pd.to_datetime(mini["日期"].astype(str), errors="coerce")
+    mini = to_num(mini, ["成交金额", "成交人数", "下单金额", "UV", "UV价值"])
+    mini = mini.dropna(subset=["date"]).sort_values("date")
+
+    cur_start, cur_end, pre_start, pre_end = complete_week_windows()
+
+    def prepare_daily(raw: pd.DataFrame) -> pd.DataFrame:
+        out = raw.copy()
+        out["date"] = pd.to_datetime(out["Date"], errors="coerce")
+        out = to_num(out, ["搜索PV", "搜索UV", "点击UV", "加购UV", "购买人数", "购买总金额"])
+        return uv_rates(out.dropna(subset=["date"]).sort_values("date"))
+
+    zara_daily_cur = prepare_daily(fetch_daily_funnel(cur_start, cur_end))
+    zara_daily_pre = prepare_daily(fetch_daily_funnel(pre_start, pre_end))
+
+    def prepare_type(raw: pd.DataFrame) -> pd.DataFrame:
+        out = raw.copy()
+        out["date"] = pd.to_datetime(out["Date"], errors="coerce")
+        out = to_num(out, ["搜索PV", "搜索UV", "点击UV", "加购UV", "购买人数", "购买总金额"])
+        return uv_rates(out.dropna(subset=["date", "操作类型"]).sort_values("date"))
+
+    zara_by_type_cur = prepare_type(fetch_by_type_funnel(cur_start, cur_end))
+    zara_by_type_pre = prepare_type(fetch_by_type_funnel(pre_start, pre_end))
+
+    hotwords = _prepare_spark_hotwords(
+        fetch_hotwords(cur_start, cur_end),
+        fetch_hotwords(pre_start, pre_end),
+    )
+    hotwords = split_women_shoes_bags(hotwords)
+
+    natural_words = _prepare_spark_natural_words(
+        fetch_natural_words(cur_start, cur_end),
+        fetch_natural_words(pre_start, pre_end),
+    )
+
+    # dwd_query_behavior_daily has no homepage-config flag/list.  Returning an
+    # empty frame is intentional: the page will say this section is unavailable
+    # in Spark mode instead of silently reading the Excel fallback.
+    home_config_words = pd.DataFrame()
+    return (
+        mini,
+        zara_daily_cur,
+        zara_daily_pre,
+        zara_by_type_cur,
+        zara_by_type_pre,
+        hotwords,
+        natural_words,
+        home_config_words,
+    )
+
+
+@st.cache_data(show_spinner=False, ttl=3600)
+def load_data(paths: dict, non_mini_source: str = SOURCE_EXCEL):
+    if non_mini_source == SOURCE_SPARK:
+        return _load_spark_data(paths)
+
     mini_path = (paths.get("mini") or "").strip()
     pmini = Path(mini_path)
     if mini_path and pmini.is_file() and pmini.suffix.lower() == ".xlsx" and not is_valid_ooxml_xlsx(pmini):
@@ -630,22 +799,37 @@ def load_data(paths: dict):
     mini["date"] = pd.to_datetime(mini["日期"].astype(str), errors="coerce")
     mini = to_num(mini, ["成交金额", "成交人数", "下单金额", "UV", "UV价值"]).dropna(subset=["date"]).sort_values("date")
 
-    # 加载当前周和上周的日度数据
-    zara_daily_cur = pd.read_excel(paths["zara_daily_cur"], header=2).copy()
-    zara_daily_cur = zara_daily_cur.dropna(subset=["Date"])
-    zara_daily_cur["date"] = pd.to_datetime(zara_daily_cur["Date"], errors="coerce")
-    zara_daily_cur = to_num(zara_daily_cur, ["搜索PV", "搜索UV", "点击UV", "加购UV", "购买人数", "购买总金额"])
-    zara_daily_cur = zara_daily_cur.dropna(subset=["date"]).sort_values("date")
-    zara_daily_cur = uv_rates(zara_daily_cur)
+    # This legacy branch is retained for Excel mode; Spark mode returns above.
+    if non_mini_source == SOURCE_SPARK:
+        cur_start, cur_end, pre_start, pre_end = complete_week_windows()
 
-    zara_daily_pre = None
-    if paths.get("zara_daily_pre") and Path(paths["zara_daily_pre"]).exists():
-        zara_daily_pre = pd.read_excel(paths["zara_daily_pre"], header=2).copy()
-        zara_daily_pre = zara_daily_pre.dropna(subset=["Date"])
-        zara_daily_pre["date"] = pd.to_datetime(zara_daily_pre["Date"], errors="coerce")
-        zara_daily_pre = to_num(zara_daily_pre, ["搜索PV", "搜索UV", "点击UV", "加购UV", "购买人数", "购买总金额"])
-        zara_daily_pre = zara_daily_pre.dropna(subset=["date"]).sort_values("date")
-        zara_daily_pre = uv_rates(zara_daily_pre)
+        def prepare_daily(raw: pd.DataFrame) -> pd.DataFrame:
+            out = raw.copy()
+            out["date"] = pd.to_datetime(out["Date"], errors="coerce")
+            out = to_num(
+                out,
+                ["搜索PV", "搜索UV", "点击UV", "加购UV", "购买人数", "购买总金额"],
+            )
+            return uv_rates(out.dropna(subset=["date"]).sort_values("date"))
+
+        zara_daily_cur = prepare_daily(fetch_daily_funnel(cur_start, cur_end))
+        zara_daily_pre = prepare_daily(fetch_daily_funnel(pre_start, pre_end))
+    else:
+        zara_daily_cur = pd.read_excel(paths["zara_daily_cur"], header=2).copy()
+        zara_daily_cur = zara_daily_cur.dropna(subset=["Date"])
+        zara_daily_cur["date"] = pd.to_datetime(zara_daily_cur["Date"], errors="coerce")
+        zara_daily_cur = to_num(zara_daily_cur, ["搜索PV", "搜索UV", "点击UV", "加购UV", "购买人数", "购买总金额"])
+        zara_daily_cur = zara_daily_cur.dropna(subset=["date"]).sort_values("date")
+        zara_daily_cur = uv_rates(zara_daily_cur)
+
+        zara_daily_pre = None
+        if paths.get("zara_daily_pre") and Path(paths["zara_daily_pre"]).exists():
+            zara_daily_pre = pd.read_excel(paths["zara_daily_pre"], header=2).copy()
+            zara_daily_pre = zara_daily_pre.dropna(subset=["Date"])
+            zara_daily_pre["date"] = pd.to_datetime(zara_daily_pre["Date"], errors="coerce")
+            zara_daily_pre = to_num(zara_daily_pre, ["搜索PV", "搜索UV", "点击UV", "加购UV", "购买人数", "购买总金额"])
+            zara_daily_pre = zara_daily_pre.dropna(subset=["date"]).sort_values("date")
+            zara_daily_pre = uv_rates(zara_daily_pre)
 
     zara_by_type_cur = pd.read_excel(paths["zara_by_type_cur"], header=2).copy()
     zara_by_type_cur = zara_by_type_cur.dropna(subset=["Date", "操作类型"])
@@ -663,62 +847,61 @@ def load_data(paths: dict):
         zara_by_type_pre = zara_by_type_pre.dropna(subset=["date"]).sort_values("date")
         zara_by_type_pre = uv_rates(zara_by_type_pre)
 
-    hot_cfg = [
-        ("女士", "hot_women_cur", "hot_women_pre", "女士热词分类"),
-        ("男士", "hot_men_cur", "hot_men_pre", "男士热词分类"),
-        ("儿童", "hot_kids_cur", "hot_kids_pre", "儿童热词分类"),
-        ("家居", "hot_home_cur", "hot_home_pre", "家居热词分类"),
-    ]
-    hot_frames = []
-    for category, fp_cur, fp_pre, kw_col in hot_cfg:
-        # 当前周热词（路径须非空：Path(\"\") 在部分环境下会解析为 cwd 导致误读）
-        if fp_cur in paths and paths[fp_cur] and Path(paths[fp_cur]).exists():
-            df_cur = pd.read_excel(paths[fp_cur], header=2).copy()
-            if kw_col in df_cur.columns:
-                df_cur = df_cur.dropna(subset=[kw_col]).copy()
-                df_cur = df_cur.rename(columns={kw_col: "关键词", "购买UV": "购买人数"})
-                days_col = find_col(df_cur, ["上架天数", "上架天数(天)"])
-                if days_col and days_col != "上架天数":
-                    df_cur = df_cur.rename(columns={days_col: "上架天数"})
-                if "上架天数" in df_cur.columns:
-                    df_cur["上架天数"] = pd.to_numeric(df_cur["上架天数"], errors="coerce")
-                df_cur["品类"] = category
-                df_cur = to_num(df_cur, ["搜索PV", "搜索UV", "点击UV", "加购UV", "购买人数"])
-                df_cur["购买总金额"] = np.nan
-                df_cur = uv_rates(df_cur)
-                
-                # 加载上周热词
-                df_pre = None
-                if fp_pre in paths and paths[fp_pre] and Path(paths[fp_pre]).exists():
-                    df_pre = pd.read_excel(paths[fp_pre], header=2).copy()
-                    if kw_col in df_pre.columns:
-                        df_pre = df_pre.dropna(subset=[kw_col]).copy()
-                        df_pre = df_pre.rename(columns={kw_col: "关键词", "购买UV": "购买人数"})
-                        df_pre = to_num(df_pre, ["搜索PV", "搜索UV", "点击UV", "加购UV", "购买人数"])
-                        df_pre["购买总金额"] = np.nan
-                        df_pre = uv_rates(df_pre)
-                
-                # 合并两周数据计算环比
-                if df_pre is not None and not df_pre.empty:
-                    merged = df_cur.merge(
-                        df_pre[["关键词", "搜索PV", "搜索UV", "点击UV", "加购UV", "购买人数", "CTR", "ATC", "CVR"]],
-                        on="关键词",
-                        how="left",
-                        suffixes=("_cur", "_pre"),
-                    )
-                    # 计算环比
-                    for col in ["搜索PV", "搜索UV", "点击UV", "加购UV", "购买人数", "CTR", "ATC", "CVR"]:
-                        merged[f"{col}_change"] = (merged[f"{col}_cur"] - merged[f"{col}_pre"]) / merged[f"{col}_pre"].replace(0, np.nan)
-                    df_cur = merged
-                else:
-                    # 即使没有前周数据，也要添加_cur后缀和_change列（设为NaN）
-                    for col in ["搜索PV", "搜索UV", "点击UV", "加购UV", "购买人数", "CTR", "ATC", "CVR"]:
-                        df_cur[f"{col}_cur"] = df_cur[col]
-                        df_cur[f"{col}_change"] = np.nan
-                
-                hot_frames.append(df_cur)
-    
-    hotwords = pd.concat(hot_frames, ignore_index=True) if hot_frames else pd.DataFrame()
+    if non_mini_source == SOURCE_SPARK:
+        hot_cur = fetch_hotwords(cur_start, cur_end)
+        hot_pre = fetch_hotwords(pre_start, pre_end)
+        hotwords = _prepare_spark_hotwords(hot_cur, hot_pre)
+    else:
+        hot_cfg = [
+            ("女士", "hot_women_cur", "hot_women_pre", "女士热词分类"),
+            ("男士", "hot_men_cur", "hot_men_pre", "男士热词分类"),
+            ("儿童", "hot_kids_cur", "hot_kids_pre", "儿童热词分类"),
+            ("家居", "hot_home_cur", "hot_home_pre", "家居热词分类"),
+        ]
+        hot_frames = []
+        for category, fp_cur, fp_pre, kw_col in hot_cfg:
+            if fp_cur in paths and paths[fp_cur] and Path(paths[fp_cur]).exists():
+                df_cur = pd.read_excel(paths[fp_cur], header=2).copy()
+                if kw_col in df_cur.columns:
+                    df_cur = df_cur.dropna(subset=[kw_col]).copy()
+                    df_cur = df_cur.rename(columns={kw_col: "关键词", "购买UV": "购买人数"})
+                    days_col = find_col(df_cur, ["上架天数", "上架天数(天)"])
+                    if days_col and days_col != "上架天数":
+                        df_cur = df_cur.rename(columns={days_col: "上架天数"})
+                    if "上架天数" in df_cur.columns:
+                        df_cur["上架天数"] = pd.to_numeric(df_cur["上架天数"], errors="coerce")
+                    df_cur["品类"] = category
+                    df_cur = to_num(df_cur, ["搜索PV", "搜索UV", "点击UV", "加购UV", "购买人数"])
+                    df_cur["购买总金额"] = np.nan
+                    df_cur = uv_rates(df_cur)
+
+                    df_pre = None
+                    if fp_pre in paths and paths[fp_pre] and Path(paths[fp_pre]).exists():
+                        df_pre = pd.read_excel(paths[fp_pre], header=2).copy()
+                        if kw_col in df_pre.columns:
+                            df_pre = df_pre.dropna(subset=[kw_col]).copy()
+                            df_pre = df_pre.rename(columns={kw_col: "关键词", "购买UV": "购买人数"})
+                            df_pre = to_num(df_pre, ["搜索PV", "搜索UV", "点击UV", "加购UV", "购买人数"])
+                            df_pre["购买总金额"] = np.nan
+                            df_pre = uv_rates(df_pre)
+
+                    if df_pre is not None and not df_pre.empty:
+                        merged = df_cur.merge(
+                            df_pre[["关键词", "搜索PV", "搜索UV", "点击UV", "加购UV", "购买人数", "CTR", "ATC", "CVR"]],
+                            on="关键词",
+                            how="left",
+                            suffixes=("_cur", "_pre"),
+                        )
+                        for col in ["搜索PV", "搜索UV", "点击UV", "加购UV", "购买人数", "CTR", "ATC", "CVR"]:
+                            merged[f"{col}_change"] = (merged[f"{col}_cur"] - merged[f"{col}_pre"]) / merged[f"{col}_pre"].replace(0, np.nan)
+                        df_cur = merged
+                    else:
+                        for col in ["搜索PV", "搜索UV", "点击UV", "加购UV", "购买人数", "CTR", "ATC", "CVR"]:
+                            df_cur[f"{col}_cur"] = df_cur[col]
+                            df_cur[f"{col}_change"] = np.nan
+                    hot_frames.append(df_cur)
+        hotwords = pd.concat(hot_frames, ignore_index=True) if hot_frames else pd.DataFrame()
+
     hotwords = split_women_shoes_bags(hotwords)
 
     home_frames = []
@@ -1615,7 +1798,7 @@ def run_formula_checks(wk, contrib, by_type, zara_daily_cur, zara_by_type_cur):
     return results
 
 
-def run_data_quality_checks(mini, zara_daily_cur, zara_daily_pre, zara_by_type_cur, zara_by_type_pre, hotwords, natural_words, home_config_words):
+def run_data_quality_checks(mini, zara_daily_cur, zara_daily_pre, zara_by_type_cur, zara_by_type_pre, hotwords, natural_words, home_config_words, non_mini_source=SOURCE_EXCEL):
     """数据质量：缺失、异常值、日期等。返回 [(check_name, passed, message), ...]"""
     results = []
 
@@ -1642,7 +1825,11 @@ def run_data_quality_checks(mini, zara_daily_cur, zara_daily_pre, zara_by_type_c
                 results.append((f"{label}-列{c}", False, f"缺少列 {c}"))
         if "date" in df.columns:
             n_days = df["date"].nunique()
-            results.append((f"{label}-天数", n_days == 7 or label == "日度-上周", f"天数={n_days}"))
+            spark_coverage_warning = non_mini_source == SOURCE_SPARK and n_days < 7
+            detail = f"天数={n_days}"
+            if spark_coverage_warning:
+                detail += "（Spark 覆盖缺口已在页面提示）"
+            results.append((f"{label}-天数", n_days == 7 or spark_coverage_warning, detail))
 
     # zara_by_type
     for df, label in [(zara_by_type_cur, "按类型-本周"), (zara_by_type_pre, "按类型-上周")]:
@@ -1892,28 +2079,72 @@ def render():
     st.set_page_config(page_title="搜索引擎质量周报", layout="wide")
     st.title("搜索引擎质量周报（自动化版）")
 
+    with st.sidebar:
+        st.subheader("数据源选择")
+        non_mini_source = st.radio(
+            "非大盘数据源",
+            [SOURCE_EXCEL, SOURCE_SPARK],
+            index=1,
+            key="non_mini_source",
+            help="该选择会同时切换日度整体、搜索类型、热词、自然词和首页配置词。小程序大盘始终固定使用 Excel。",
+        )
+        st.info(
+            f"小程序大盘：固定使用 Excel\n\n"
+            f"其他周报数据：当前使用 {non_mini_source}"
+        )
+
     render_sidebar_toc()
     paths = build_default_paths()
 
-    # 家居热词并非每周都会导出；缺失时 load_data 会跳过，页面对应位置显示“暂无热词数据”。
-    required = ["mini", "zara_daily_cur", "zara_by_type_cur", "hot_women_cur", "hot_men_cur", "hot_kids_cur"]
+    required = ["mini"]
+    if non_mini_source == SOURCE_EXCEL:
+        required += ["zara_daily_cur", "zara_by_type_cur", "hot_women_cur", "hot_men_cur", "hot_kids_cur"]
     missing = [k for k in required if not paths.get(k) or not Path(paths[k]).exists()]
     if missing:
-        st.error("必需数据文件缺失，请检查 zara周报数据源 目录下是否有最新导出文件。")
+        st.error(f"{non_mini_source} 模式所需数据缺失，请检查数据源配置。")
         for key in missing:
             st.caption(f"缺失：{key} → {paths.get(key, '(路径为空)')}")
         st.stop()
 
-    mini, zara_daily_cur, zara_daily_pre, zara_by_type_cur, zara_by_type_pre, hotwords, natural_words, home_config_words = load_data(paths)
+    mini, zara_daily_cur, zara_daily_pre, zara_by_type_cur, zara_by_type_pre, hotwords, natural_words, home_config_words = load_data(paths, non_mini_source)
     wk = weekly_from_daily(zara_daily_cur, zara_daily_pre)
     contrib = contribution_summary(wk, mini)
 
     by_type = type_weekly_summary(zara_by_type_cur, zara_by_type_pre)
 
     st.caption(f"本周：{wk['period']['cur']} | 上周：{wk['period']['pre']}")
+    if non_mini_source == SOURCE_EXCEL:
+        st.caption("数据源状态：小程序大盘与其他周报数据均来自原始 Excel。")
+    if non_mini_source == SOURCE_SPARK:
+        st.caption("数据源状态：小程序大盘 = Excel；日度整体、搜索类型、热词、自然词 = Zara Spark；首页配置词 = Spark 无等价字段（不回退 Excel）。")
+        expected_cur = pd.date_range(
+            zara_daily_cur["date"].min().normalize(),
+            zara_daily_cur["date"].max().normalize(),
+            freq="D",
+        ).date
+        expected_pre = pd.date_range(
+            zara_daily_pre["date"].min().normalize(),
+            zara_daily_pre["date"].max().normalize(),
+            freq="D",
+        ).date
+        cur_dates = set(zara_daily_cur["date"].dt.date)
+        pre_dates = set(zara_daily_pre["date"].dt.date) if zara_daily_pre is not None else set()
+        missing_cur = [str(day) for day in expected_cur if day not in cur_dates]
+        missing_pre = [str(day) for day in expected_pre if day not in pre_dates]
+        if missing_cur or missing_pre:
+            missing_text = []
+            if missing_cur:
+                missing_text.append(f"本周缺失 {', '.join(missing_cur)}")
+            if missing_pre:
+                missing_text.append(f"上周缺失 {', '.join(missing_pre)}")
+            st.warning(
+                "Spark 日度搜索表按给定 SQL 只返回存在搜索行为的日期；" +
+                "；".join(missing_text) + "，未补零。请确认这些日期的底表是否完整。"
+            )
 
     section_anchor("sec-1")
-    st.subheader("1) 搜索引擎整体周环比（仅 zara日度数据.xlsx）")
+    section_one_source = non_mini_source
+    st.subheader(f"1) 搜索引擎整体周环比（{section_one_source}）")
     kpi = ["搜索UV", "点击UV", "加购UV", "购买人数", "CTR", "ATC", "CVR"]
     cols = st.columns(len(kpi))
     for i, name in enumerate(kpi):
@@ -1964,6 +2195,8 @@ def render():
 
     section_anchor("sec-3")
     st.subheader("3) 搜索类型周环比（全链路）")
+    if non_mini_source == SOURCE_SPARK:
+        st.caption("搜索类型来自 Zara Spark 的 query_handle_type：200/400 合并为自然搜索，203 为热词搜索，其他编码透明展示；不读取搜索类型 Excel。搜索类型 UV 为 query 级 UV 求和，同一用户搜索多个词时可能在多个类型中重复计数。")
     # 图3-0: 搜索量占比柱状图（柱高为搜索UV占比）
     fig_t0 = go.Figure()
     total_uv_cur = by_type["搜索UV_本周"].sum()
@@ -2050,6 +2283,8 @@ def render():
         if cate == SHOES_BAGS_CATEGORY:
             st.caption("由女士品类中筛出鞋、包、靴、袋等相关搜索词，单独作为鞋包类目展示。")
         st.markdown(f"**{cate} - 热词分析**")
+        if non_mini_source == SOURCE_SPARK:
+            st.caption("热词数据源：Zara Spark，query_handle_type = 203，按当前完整 7 日窗口汇总全量词。")
         hot_chart_key = f"{cate}_hot"
         hot_title = f"{cate} 热词：CTR vs CVR（气泡=搜索PV）"
         data_hot = render_interactive_category_scatter(
@@ -2103,6 +2338,8 @@ def render():
                 )
 
         st.markdown(f"**{cate} - 首页配置词分析**")
+        if non_mini_source == SOURCE_SPARK:
+            st.caption("Zara Spark 底表没有首页配置词字段，本模式不回读 Excel，因此该部分仅显示为空。")
         home_chart_key = f"{cate}_home"
         home_title = f"{cate} 首页配置词：CTR vs CVR（气泡=搜索PV）"
         data_home = render_interactive_category_scatter(
@@ -2154,6 +2391,8 @@ def render():
                 )
 
         st.markdown(f"**{cate} - 自然词分析**")
+        if non_mini_source == SOURCE_SPARK:
+            st.caption("自然词数据源：Zara Spark，query_handle_type ∈ {200, 400}，按当前/上周完整窗口汇总。")
         data_nat = None
         women_natural_skip_tables = False
         nat_chart_key = f"{cate}_nat"
@@ -2250,7 +2489,17 @@ def render():
     st.subheader("5) 数据校验")
     disp_checks = run_display_consistency_checks(wk, contrib, by_type, zara_daily_cur, zara_daily_pre, mini, zara_by_type_cur, zara_by_type_pre)
     formula_checks = run_formula_checks(wk, contrib, by_type, zara_daily_cur, zara_by_type_cur)
-    quality_checks = run_data_quality_checks(mini, zara_daily_cur, zara_daily_pre, zara_by_type_cur, zara_by_type_pre, hotwords, natural_words, home_config_words)
+    quality_checks = run_data_quality_checks(
+        mini,
+        zara_daily_cur,
+        zara_daily_pre,
+        zara_by_type_cur,
+        zara_by_type_pre,
+        hotwords,
+        natural_words,
+        home_config_words,
+        non_mini_source,
+    )
     baseline_passed, baseline_diffs = compare_against_baseline(wk, contrib, by_type, str(BASELINE_PATH))
 
     def render_check_list(items, title):
