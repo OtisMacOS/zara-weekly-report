@@ -1,0 +1,13 @@
+{
+  "source": "Apple Say MCPHub / hotword_management_get_zara_hotword_admin_snapshot",
+  "fetched_at": "2026-09-29T17:05:00+08:00",
+  "config_hash": "05415b7225684ad2121ead4600950f6a58b91cbd03d0bef8c65bd92a4f094369",
+  "snapshot_fingerprint": "401f7bfad042137941d1cc2817c2e59878b156f470102e5dac95a66ca1b16512",
+  "categories": {
+    "女士": [{"关键词":"工装裤","status":"HOT","sort":1},{"关键词":"短袖针织","status":"","sort":2},{"关键词":"打底衫","status":"HOT","sort":3},{"关键词":"大衣","status":"","sort":4},{"关键词":"法式连衣裙","status":"HOT","sort":5},{"关键词":"西装外套","status":"","sort":6},{"关键词":"长袖T恤","status":"","sort":7},{"关键词":"皮衣","status":"","sort":8},{"关键词":"马甲","status":"","sort":9},{"关键词":"亚麻裤","status":"","sort":10},{"关键词":"阔腿裤","status":"","sort":11},{"关键词":"豹纹","status":"","sort":12}],
+    "男士": [{"关键词":"印花","status":"HOT","sort":1},{"关键词":"针织衫","status":"","sort":2},{"关键词":"牛仔","status":"HOT","sort":3},{"关键词":"亚麻长裤","status":"","sort":4},{"关键词":"长袖衬衫","status":"HOT","sort":5},{"关键词":"拉链外套","status":"","sort":6},{"关键词":"皮革","status":"","sort":7},{"关键词":"POLO衫","status":"","sort":8},{"关键词":"宽松版型裤","status":"","sort":9},{"关键词":"牛仔裤","status":"","sort":10},{"关键词":"条纹","status":"","sort":11}],
+    "儿童": [{"关键词":"长袖T恤","status":"HOT","sort":1},{"关键词":"卡通衬衫","status":"","sort":2},{"关键词":"插肩袖","status":"HOT","sort":3},{"关键词":"背心","status":"","sort":4},{"关键词":"针织外套","status":"HOT","sort":5},{"关键词":"灯芯绒","status":"","sort":6},{"关键词":"卫衣","status":"","sort":7},{"关键词":"针织衫","status":"","sort":8},{"关键词":"休闲裤","status":"","sort":9},{"关键词":"运动裤","status":"","sort":10},{"关键词":"JENNIE","status":"","sort":11}],
+    "家居": [{"关键词":"拖鞋","status":"HOT","sort":1},{"关键词":"宠物用品","status":"","sort":2},{"关键词":"枕套","status":"HOT","sort":3},{"关键词":"餐具","status":"","sort":4},{"关键词":"收纳","status":"HOT","sort":5},{"关键词":"花瓶","status":"","sort":6},{"关键词":"母婴包","status":"","sort":7},{"关键词":"首饰盒","status":"","sort":8},{"关键词":"柑橘系列","status":"","sort":9},{"关键词":"睡裙","status":"","sort":10},{"关键词":"身体乳","status":"","sort":11},{"关键词":"毛巾","status":"","sort":12}],
+    "鞋包": [{"关键词":"单鞋","status":"HOT","sort":1},{"关键词":"芭蕾鞋","status":"","sort":2},{"关键词":"长靴","status":"HOT","sort":3},{"关键词":"乐福鞋","status":"","sort":4},{"关键词":"托特包","status":"HOT","sort":5},{"关键词":"堆堆靴","status":"","sort":6},{"关键词":"短筒靴","status":"","sort":7},{"关键词":"德训鞋","status":"","sort":8},{"关键词":"腋下包","status":"","sort":9},{"关键词":"反绒皮包","status":"","sort":10},{"关键词":"豹纹鞋包","status":"","sort":11},{"关键词":"猫跟鞋","status":"","sort":12}]
+  }
+}

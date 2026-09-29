@@ -26,6 +26,35 @@ DEFAULT_BASE_DIR_CANDIDATES = [
     Path(__file__).parent / "zara周报数据源",
     Path(__file__).parent / "演示",
 ]
+ON_SHELF_HOTWORDS_SNAPSHOT = Path(__file__).parent / "zara_current_onshelf_hotwords.json"
+
+
+def load_onshelf_hotwords_snapshot() -> dict:
+    """读取 MCP Hub 热词后台快照；读取失败时不影响周报主流程。"""
+    try:
+        with ON_SHELF_HOTWORDS_SNAPSHOT.open(encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError, TypeError):
+        return {}
+
+
+def merge_onshelf_hotword_status(df: pd.DataFrame) -> pd.DataFrame:
+    """按品类+关键词标记 MCP Hub 当前展示（上架）热词。"""
+    if df is None or df.empty or "品类" not in df.columns or "关键词" not in df.columns:
+        return df
+    snapshot = load_onshelf_hotwords_snapshot()
+    lookup = {}
+    for category, words in snapshot.get("categories", {}).items():
+        for word in words or []:
+            key = (str(category).strip(), str(word.get("关键词", "")).strip())
+            if key[1]:
+                lookup[key] = (True, word.get("status") or "", word.get("sort"))
+    out = df.copy()
+    info = [lookup.get((str(c).strip(), str(k).strip()), (False, "", None)) for c, k in zip(out["品类"], out["关键词"])]
+    out["当前上架"] = [x[0] for x in info]
+    out["运营标记"] = [x[1] for x in info]
+    out["上架排序"] = [x[2] for x in info]
+    return out
 
 
 def find_latest_periods(base_dir: Path) -> tuple:
@@ -754,7 +783,7 @@ def _load_spark_data(paths: dict):
         fetch_hotwords(cur_start, cur_end),
         fetch_hotwords(pre_start, pre_end),
     )
-    hotwords = split_women_shoes_bags(hotwords)
+    hotwords = merge_onshelf_hotword_status(split_women_shoes_bags(hotwords))
 
     natural_words = _prepare_spark_natural_words(
         fetch_natural_words(cur_start, cur_end),
@@ -902,7 +931,7 @@ def load_data(paths: dict, non_mini_source: str = SOURCE_EXCEL):
                     hot_frames.append(df_cur)
         hotwords = pd.concat(hot_frames, ignore_index=True) if hot_frames else pd.DataFrame()
 
-    hotwords = split_women_shoes_bags(hotwords)
+    hotwords = merge_onshelf_hotword_status(split_women_shoes_bags(hotwords))
 
     home_frames = []
     hc_cur = paths.get("home_cfg_cur", "")
@@ -1371,15 +1400,21 @@ def _add_perf_scatter_traces(
     dimmed = dimmed_keywords or set()
     sub = sub.copy()
     sub["is_dimmed"] = sub["关键词"].isin(dimmed)
+    has_onshelf = "当前上架" in sub.columns
     hover = (
         "关键词: %{customdata[0]}<br>搜索PV: %{customdata[1]:,.0f}<br>搜索UV: %{customdata[2]:,.0f}"
-        "<br>CTR: %{x:.2%}<br>CVR: %{y:.2%}<extra></extra>"
+        "<br>CTR: %{x:.2%}<br>CVR: %{y:.2%}"
+        + ("<br>当前上架: %{customdata[3]}<br>运营标记: %{customdata[4]}" if has_onshelf else "")
+        + "<extra></extra>"
     )
 
     def add_trace(group: pd.DataFrame, name: str, color: str, opacity: float, showlegend: bool = True, dimmed_trace: bool = False):
         if group.empty:
             return
         text_color = "rgba(150,150,150,0.45)" if dimmed_trace else "black"
+        custom_cols = [group["关键词"], group[pv_col], group[uv_col]]
+        if has_onshelf:
+            custom_cols += [group["当前上架"].map({True: "是", False: "否"}), group["运营标记"]]
         fig.add_trace(
             go.Scatter(
                 x=group[ctr_col],
@@ -1394,8 +1429,13 @@ def _add_perf_scatter_traces(
                     sizemode="diameter",
                     opacity=opacity,
                     color=color,
+                    symbol=(group["当前上架"].map({True: "star", False: "circle"}) if has_onshelf else "circle"),
+                    line=(dict(
+                        color=group["当前上架"].map({True: "#ff8c00", False: "rgba(0,0,0,0)"}),
+                        width=2,
+                    ) if has_onshelf else None),
                 ),
-                customdata=np.stack([group["关键词"], group[pv_col], group[uv_col]], axis=1),
+                customdata=np.stack(custom_cols, axis=1),
                 hovertemplate=hover,
                 showlegend=showlegend,
             )
@@ -1634,6 +1674,13 @@ def category_scatter(
         if "上架天数" in sub.columns:
             base_cols.insert(1, "上架天数")
         table_data = sub[base_cols].copy()
+
+    # 热词与 MCP Hub 后台快照匹配后的上架状态，放在表格最前便于核对。
+    for col in ["当前上架", "运营标记", "上架排序"]:
+        if col in sub.columns:
+            table_data[col] = sub.loc[table_data.index, col].values
+    preferred = [c for c in ["当前上架", "运营标记", "上架排序"] if c in table_data.columns]
+    table_data = table_data[preferred + [c for c in table_data.columns if c not in preferred]]
     
     table_data = table_data.sort_values("搜索PV", ascending=False).reset_index(drop=True)
     
@@ -2285,11 +2332,15 @@ def render():
         st.markdown(f"**{cate} - 热词分析**")
         if non_mini_source == SOURCE_SPARK:
             st.caption("热词数据源：Zara Spark，query_handle_type = 203，按当前完整 7 日窗口汇总全量词。")
+        st.caption("上架状态来自 MCP Hub Zara 热词后台快照；图中星形=当前上架，橙色描边=上架词，HOT 为独立的运营重点标记。")
+        onshelf_only = st.checkbox("只看当前上架热词", key=f"onshelf_{cate}")
         hot_chart_key = f"{cate}_hot"
         hot_title = f"{cate} 热词：CTR vs CVR（气泡=搜索PV）"
         data_hot = render_interactive_category_scatter(
             lambda dimmed, _c=cate, _t=hot_title: category_scatter(
-                hotwords, _c, _t, dimmed_keywords=dimmed
+                hotwords, _c, _t,
+                plot_df=(hotwords[(hotwords["品类"] == _c) & hotwords["当前上架"]] if onshelf_only and "当前上架" in hotwords.columns else None),
+                dimmed_keywords=dimmed
             ),
             hot_chart_key,
         )
